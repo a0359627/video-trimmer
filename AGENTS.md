@@ -7,13 +7,13 @@ This file defines the authoritative rules for AI Coding Agents (Google Antigravi
 ## Part I: Operational Invariants (When Executing Video Trimmer Tasks)
 
 1. **Strict Toolset Execution Only (No Ad-Hoc Scripts)**:
-   - Execute all video rough-cutting, take selection, acoustic onset snapping, NLE XML/FCPXML/EDL exporting, and video rendering exclusively via the official scripts in `skills/video-trimmer/scripts/` (symlinked at `scripts/` and `video_trimmer.py` at `<PLUGIN_ROOT>`).
+   - Execute all video rough-cutting, take selection, acoustic onset snapping, NLE XML/FCPXML/EDL exporting, and video rendering exclusively via the official scripts in `skills/video-trimmer/scripts/`.
    - Writing temporary Python scripts, ad-hoc regex deduplication, or custom audio/video trimming logic is **STRICTLY FORBIDDEN**.
 2. **Mandatory 3-Step Gated Workflow (Direct CLI Invocation)**:
    - Resolve `<PLUGIN_ROOT>` as two directory levels above `skills/video-trimmer/SKILL.md` (`../../`, e.g., `/Users/sylph/.gemini/config/plugins/video-trimmer`).
    - Follow the 3-Step Runbook defined in [SKILL.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/SKILL.md):
      - **Step 1 (Environment & Cloud Auth Verification)**: Verify FFmpeg, `gcloud` ADC credentials, and `.env` configuration (`GOOGLE_CLOUD_PROJECT`, `VIDEO_TRIMMER_BUCKET`) from `<PLUGIN_ROOT>`.
-     - **Step 2 (Pipeline Execution)**: Run `python3 skills/video-trimmer/scripts/video_trimmer.py` (or `python3 video_trimmer.py` with `Cwd` set to `<PLUGIN_ROOT>`) directly via `run_command`. Pass `-s <SCRIPT_FILE>` whenever the user provides a shooting script or outline (Mode A: Monotonic Script-Anchored Alignment); omit `-s` for unscripted recordings (Mode B: Unscripted Intent-Window Arbitration). Run in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) unless `--agentic` is explicitly requested.
+     - **Step 2 (Pipeline Execution)**: Run `python3 skills/video-trimmer/scripts/video_trimmer.py` (with `Cwd` set to `<PLUGIN_ROOT>`) directly via `run_command`. Pass `-s <SCRIPT_FILE>` whenever the user provides a shooting script or outline (Mode A: Monotonic Script-Anchored Alignment); omit `-s` for unscripted recordings (Mode B: Unscripted Intent-Window Arbitration). Run in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) unless `--agentic` is explicitly requested.
      - **Step 3 (Deliverable Verification)**: Verify that all required outputs (`.mp4`, `.fcpxml`, `.xml`, `.edl`, `.csv`, and `_edl_report.md`) exist on disk and are non-empty (`> 0 bytes`).
 3. **Fail-Fast & Exit Gate Verification**:
    - If any script exits with a non-zero status (e.g., missing ADC credentials, 403/401 GCS/Vertex AI permission error, or missing FFmpeg), stop immediately, report the exact error and exit status, and instruct the user to run `./setup.sh --project YOUR_PROJECT_ID` or `gcloud auth application-default login`.
@@ -28,10 +28,9 @@ This file defines the authoritative rules for AI Coding Agents (Google Antigravi
 
 When modifying code, prompts, infrastructure scripts, or documentation in this repository, you MUST adhere to the following engineering standards:
 
-### 1. Single Source of Truth (SSOT) & Symlink Integrity (Agent Plugins 1.0 Specification)
+### 1. Single Source of Truth (SSOT) Directory Architecture (Agent Plugins 1.0 Specification)
 - **Canonical Code Location**: All core Python scripts (`scripts/*.py`) and prompt templates (`prompts/*.md`) physically reside inside `skills/video-trimmer/scripts/` and `skills/video-trimmer/prompts/` in compliance with the [Agent Plugins 1.0 Specification](https://agent-plugins.org/specification) (§4.2 & §7.1).
-- **Root Symlinks**: Top-level `scripts` and `prompts` at the repository root are POSIX symlinks pointing to `skills/video-trimmer/scripts` and `skills/video-trimmer/prompts` (§4.1.3).
-- **Rule**: Always edit files under `skills/video-trimmer/scripts/` and `skills/video-trimmer/prompts/`. Never replace root symlinks with duplicate physical directories.
+- **Rule**: Always edit files under `skills/video-trimmer/scripts/` and `skills/video-trimmer/prompts/`. Do not create root-level symlinks or duplicate physical directories at the repository root.
 
 ### 2. 4-Layer Unified Architecture & Zero Semantic String-Matching Invariant
 - **Zero Python Semantic Retake Guessing**: Never use Python string-similarity heuristics (`difflib`, character overlap ratios, or regex keyword matching) in [transcribe.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/transcribe.py) to classify semantic retakes or filter sentences. Semantic take arbitration belongs exclusively to the LLM in [video_cut_prompt.md](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/prompts/video_cut_prompt.md).

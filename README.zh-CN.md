@@ -29,16 +29,20 @@
 5. **声学起音锁定与 15 ms 等功率微交叉淡化 (`acoustic.py` / `render.py`)**：
    - 将剪辑入点锁定在声带振动前 80 ms，并在每个剪辑边界注入 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 与 `afade=t=out:d=0.015:curve=oqsin`）。
 6. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出**：
-   - 核心代码与提示词位于 `skills/video-trimmer/scripts/` 与 `skills/video-trimmer/prompts/`（SSOT），根目录提供 POSIX symlinks 与双层 `AGENTS.md` / `rules/AGENTS.md` 规范；支持导出 **FCP7 XML**、**FCPXML**、**CMX 3600 EDL** 与 **CSV**。
+   - 核心代码与提示词位于 `skills/video-trimmer/scripts/` 与 `skills/video-trimmer/prompts/`（SSOT），无根目录冗余软链接，并提供双层 `AGENTS.md` / `rules/AGENTS.md` 规范；支持导出 **FCP7 XML**、**FCPXML**、**CMX 3600 EDL** 与 **CSV**。
 
 ---
 
 ## 安装与 Google Cloud 环境配置
 
 ```bash
-# 1. 安装 FFmpeg 与 Python 依赖
+# 1. 安装 FFmpeg 与克隆 Agent Plugin（推荐）
 brew install ffmpeg
 git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
+
+# （可选）旧版独立 Skill 目录安装（~/.gemini/config/skills/ 兼容方式）
+ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
+
 pip install -r requirements.txt
 pip install mlx-whisper
 

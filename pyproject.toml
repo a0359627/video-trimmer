@@ -59,9 +59,11 @@ Homepage = "https://github.com/sylphlin/video-trimmer"
 Repository = "https://github.com/sylphlin/video-trimmer.git"
 
 [tool.setuptools]
-py-modules = ["video_trimmer"]
 packages = ["scripts"]
 
+[tool.setuptools.package-dir]
+"" = "skills/video-trimmer"
+
 [project.scripts]
-video-trimmer = "video_trimmer:main"
+video-trimmer = "scripts.video_trimmer:main"
 

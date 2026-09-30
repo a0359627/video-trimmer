@@ -29,16 +29,20 @@
 5. **音響オンセット・スナッピング＆ 15 ms 等パワー音声マイクロクロスフェード**：
    - 声帯振動の 80 ms 前にカット点を配置し、すべてのカット境界に 15 ms のマイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=oqsin`）を適用します。
 6. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力**：
-   - コアスクリプトとプロンプトは `skills/video-trimmer/scripts/` および `skills/video-trimmer/prompts/`（SSOT）に配置され、ルート POSIX シンボリックリンクと 2 層 `AGENTS.md` / `rules/AGENTS.md` を備えています。**FCP7 XML**、**FCPXML**、**CMX 3600 EDL**、**CSV** を出力します。
+   - コアスクリプトとプロンプトは `skills/video-trimmer/scripts/` および `skills/video-trimmer/prompts/`（SSOT）に配置され、ルート直下のシンボリックリンクを持たない純粋な構成と 2 層 `AGENTS.md` / `rules/AGENTS.md` を備えています。**FCP7 XML**、**FCPXML**、**CMX 3600 EDL**、**CSV** を出力します。
 
 ---
 
 ## セットアップと Google Cloud 構成
 
 ```bash
-# 1. FFmpeg と Python パッケージのインストール
+# 1. FFmpeg のインストールと Agent Plugin としてのクローン（推奨）
 brew install ffmpeg
 git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
+
+# （オプション）従来の単一 Skill ディレクトリへのインストール（~/.gemini/config/skills/ 互換）
+ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
+
 pip install -r requirements.txt
 pip install mlx-whisper
 

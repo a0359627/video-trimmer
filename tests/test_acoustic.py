@@ -2,6 +2,7 @@
 
 import unittest
 import numpy as np
+import tests  # noqa: F401
 from scripts.acoustic import calculate_clip_cps, refine_speech_bounds_locked
 
 SR = 16000

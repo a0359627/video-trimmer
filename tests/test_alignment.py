@@ -1,10 +1,6 @@
 import unittest
-
-try:
-    import pytest
-except ImportError:
-    import tests
-    import pytest
+import tests  # noqa: F401
+import pytest
 
 from pathlib import Path
 import tempfile
@@ -188,7 +184,13 @@ class TestAlignClipWithWhisper(unittest.TestCase):
 
     def test_dual_mode_prompt_formatting_mode_a_and_mode_b(self):
         """Verify build_prompt generates Mode A numbered script blocks with script_path and Mode B without script_path."""
-        prompt_candidates = [Path(__file__).resolve().parent.parent / "prompts" / "video_cut_prompt.md"]
+        prompt_candidates = [
+            Path(__file__).resolve().parent.parent
+            / "skills"
+            / "video-trimmer"
+            / "prompts"
+            / "video_cut_prompt.md"
+        ]
         units = _build_units()
 
         # Mode B (no script)

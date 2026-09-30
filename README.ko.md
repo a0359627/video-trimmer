@@ -29,16 +29,20 @@
 5. **음향 온셋 스내핑 및 15 ms 등전력 마이크로 크로스페이드**:
    - 성대 진동 80 ms 전에 컷 포인트를 배치하고 모든 편집 경계에 15 ms 마이크로 페이드(`afade=t=in:d=0.015:curve=iqsin` 및 `afade=t=out:d=0.015:curve=oqsin`)를 적용하여 팝 노이즈를 방지합니다.
 6. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원**:
-   - 핵심 스크립트와 프롬프트는 `skills/video-trimmer/scripts/` 및 `skills/video-trimmer/prompts/`(SSOT)에 위치하며 루트 POSIX 심볼릭 링크와 2계층 `AGENTS.md` / `rules/AGENTS.md`를 제공합니다. **FCP7 XML**, **FCPXML**, **CMX 3600 EDL** 및 **CSV**를 내보냅니다.
+   - 핵심 스크립트와 프롬프트는 `skills/video-trimmer/scripts/` 및 `skills/video-trimmer/prompts/`(SSOT)에 위치하며 루트 심볼릭 링크 없는 순수 구조와 2계층 `AGENTS.md` / `rules/AGENTS.md`를 제공합니다. **FCP7 XML**, **FCPXML**, **CMX 3600 EDL** 및 **CSV**를 내보냅니다.
 
 ---
 
 ## 설치 및 Google Cloud 설정
 
 ```bash
-# 1. FFmpeg 및 Python 패키지 설치
+# 1. FFmpeg 설치 및 Agent Plugin으로 클론 (권장)
 brew install ffmpeg
 git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
+
+# (선택 사항) 기존 단일 Skill 디렉터리 설치 (~/.gemini/config/skills/ 호환 방식)
+ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
+
 pip install -r requirements.txt
 pip install mlx-whisper
 

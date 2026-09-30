@@ -42,8 +42,6 @@ video-trimmer/
 │       │   └── render.py             # ffprobe inspection & ffmpeg final render
 │       └── prompts/                  # Canonical multimodal prompting specifications (SSOT)
 │           └── video_cut_prompt.md   # Dual-mode take arbitration & 5-rule subtraction prompt
-├── scripts -> skills/video-trimmer/scripts  # Root POSIX symlink for CLI & test compatibility
-├── prompts -> skills/video-trimmer/prompts  # Root POSIX symlink for prompt resolution
 ├── AGENTS.md                         # Workspace & engineering development rules (ASD-STE100 English)
 ├── README.md                         # Public GitHub README documentation
 ├── LICENSE                           # MIT License
@@ -51,7 +49,6 @@ video-trimmer/
 ├── setup.sh                          # 100% Native gcloud GCP provisioning script (Zero Terraform)
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
 ├── requirements.txt                  # Python runtime dependencies
-├── video_trimmer.py                  # Primary CLI entrypoint forwarder
 └── tests/                            # Offline unit tests
 ```
 
@@ -90,7 +87,7 @@ video-trimmer/
 
 When an AI agent is instructed to rough-cut or trim a raw video, follow this protocol directly.
 Resolve `<PLUGIN_ROOT>` as the repository or plugin root located two levels above `skills/video-trimmer/SKILL.md` (`../../`, for example `/Users/sylph/.gemini/config/plugins/video-trimmer`).
-Set the command working directory (`Cwd`) to `<PLUGIN_ROOT>` and invoke `python3 skills/video-trimmer/scripts/video_trimmer.py` (or `python3 video_trimmer.py`) directly. Do not search the filesystem with `find_by_name` or `list_dir` to locate the CLI entrypoint.
+Set the command working directory (`Cwd`) to `<PLUGIN_ROOT>` and invoke `python3 skills/video-trimmer/scripts/video_trimmer.py` directly. Do not search the filesystem with `find_by_name` or `list_dir` to locate the CLI entrypoint.
 
 ### Step 1: Environment Verification & GCP Native Setup
 Run a single pre-flight check in `<PLUGIN_ROOT>` to verify that FFmpeg and `.env` configuration exist:
@@ -180,5 +177,5 @@ For an input file `raw_footage.mp4`, the skill generates:
 - Automatically checks remote MD5 (`md5Checksum`) to cache locally in `<output_dir>/gdrive_inputs/` and checks `sha256` / `gdrive_md5` metadata on `gs://${VIDEO_TRIMMER_BUCKET}/raw/` to skip redundant GCS uploads.
 - Example:
   ```bash
-  python3 video_trimmer.py -i "https://drive.google.com/file/d/YOUR_VIDEO_FILE_ID/view?usp=sharing" -o output/
+  python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/YOUR_VIDEO_FILE_ID/view?usp=sharing" -o output/
   ```

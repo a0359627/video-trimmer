@@ -3,11 +3,11 @@
 When you execute tasks or skills from this plugin, you MUST follow these operational rules:
 
 ## 1. Strict Read-Only Execution & Direct CLI Invocation (Do Not Modify Plugin Code)
-- All Python scripts (`skills/video-trimmer/scripts/*.py`, symlinked at `scripts/*.py` and `video_trimmer.py`), prompt specifications (`skills/video-trimmer/prompts/*.md`, symlinked at `prompts/*.md`), and configuration files are read-only tools.
+- All Python scripts (`skills/video-trimmer/scripts/*.py`), prompt specifications (`skills/video-trimmer/prompts/*.md`), and configuration files are read-only tools.
 - Do NOT edit, patch, or rewrite any files in this plugin with `replace_file_content`, `write_to_file`, or shell commands.
 - Do NOT write ad-hoc temporary Python scripts, custom regex deduplication, or one-off audio/video trimming scripts.
 - Resolve `<PLUGIN_ROOT>` as two directory levels above `skills/video-trimmer/SKILL.md` (`../../`, e.g., `/Users/sylph/.gemini/config/plugins/video-trimmer`).
-- Set `Cwd` to `<PLUGIN_ROOT>` and run `python3 skills/video-trimmer/scripts/video_trimmer.py` (or `python3 video_trimmer.py`) directly with `run_command` after verifying the environment (`Step 1`). Do NOT search for global `video-trimmer` CLI aliases with `find_by_name` or `list_dir`.
+- Set `Cwd` to `<PLUGIN_ROOT>` and run `python3 skills/video-trimmer/scripts/video_trimmer.py` directly with `run_command` after verifying the environment (`Step 1`). Do NOT search for global `video-trimmer` CLI aliases with `find_by_name` or `list_dir`.
 
 ## 2. Fail-Fast on Errors & Exit Gate Verification (Do Not Debug or Rewrite Code)
 - If a script fails (exit code is not 0) or an external error occurs (such as 401 Unauthorized, 403 Forbidden, Quota Exceeded, missing Application Default Credentials, or missing FFmpeg):

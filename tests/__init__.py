@@ -2,6 +2,11 @@
 
 import math
 import sys
+from pathlib import Path
+
+_SKILL_ROOT = str(Path(__file__).resolve().parent.parent / "skills" / "video-trimmer")
+if _SKILL_ROOT not in sys.path:
+    sys.path.insert(0, _SKILL_ROOT)
 
 try:
     import pytest

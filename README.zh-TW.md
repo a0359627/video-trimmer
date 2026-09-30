@@ -59,10 +59,7 @@ video-trimmer/
 │       │   └── render.py                    # ffprobe 檢測與 FFmpeg 15ms 微淡化渲染
 │       └── prompts/                         # 提示詞規範實體目錄 (SSOT)
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
-├── scripts -> skills/video-trimmer/scripts  # 根目錄 POSIX Symlink（供 CLI 與測試直接引用）
-├── prompts -> skills/video-trimmer/prompts  # 根目錄 POSIX Symlink
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
-├── video_trimmer.py                         # 根目錄 CLI 啟動入口
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
 └── tests/                                   # 離線單元測試套件（81 項測試）
 ```
@@ -86,6 +83,9 @@ sudo apt update && sudo apt install -y ffmpeg
 ```bash
 # 全域 Antigravity Plugin（建議）
 git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
+
+# 舊版獨立 Skill 目錄安裝（~/.gemini/config/skills/ 相容方式）
+ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
 
 # 安裝 Python 相依套件與 Apple Silicon Metal 加速
 pip install -r requirements.txt

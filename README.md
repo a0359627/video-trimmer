@@ -62,8 +62,6 @@ video-trimmer/
 │       │   └── render.py                    # ffprobe inspection and FFmpeg micro-crossfade rendering
 │       └── prompts/                         # Canonical prompt specifications (SSOT)
 │           └── video_cut_prompt.md          # Dual-mode take arbitration & 5-rule subtraction prompt
-├── scripts -> skills/video-trimmer/scripts  # Root POSIX symlink for CLI & test compatibility
-├── prompts -> skills/video-trimmer/prompts  # Root POSIX symlink for prompt resolution
 ├── AGENTS.md                                # Workspace & engineering development rules (Part I & Part II)
 ├── README.md                                # English documentation
 ├── LICENSE                                  # MIT License
@@ -71,7 +69,6 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-├── video_trimmer.py                         # Primary CLI entrypoint forwarder
 └── tests/                                   # Offline unit test suite (81 tests)
 ```
 
@@ -100,6 +97,9 @@ git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins
 
 # Or Workspace Plugin
 git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-trimmer
+
+# Legacy Single-Skill Installation (~/.gemini/config/skills/)
+ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
 ```
 
 #### Option B: Install Standalone Python CLI
