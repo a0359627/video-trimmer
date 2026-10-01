@@ -5,12 +5,16 @@ import unittest
 from pathlib import Path
 
 from scripts.edl_auditor import (
+    _script_block_coverage_score,
     audit_edl_quality,
+    deduplicate_and_sort_clips,
     detect_micro_window_anomalies,
+    extract_script_blocks,
     generate_edl_audit_markdown,
     repair_edl_micro_windows,
     sanitize_refined_edl,
 )
+from scripts.gemini_client import format_script_blocks_for_prompt
 
 
 def _sample_whisper_units():
@@ -21,6 +25,52 @@ def _sample_whisper_units():
         {"id": 4, "start": 30.0, "end": 40.0, "text": "雙縫實驗證明了微觀粒子同時具備波動性與粒子性", "is_target_speaker": True},
         {"id": 5, "start": 45.0, "end": 55.0, "text": "最後請記得訂閱我們的頻道並開啟小鈴鐺", "is_target_speaker": True},
     ]
+
+
+class TestScriptParserAndCoverage(unittest.TestCase):
+    def test_script_parser_filters_metadata_frontmatter_and_aligns_with_prompt_formatter(self):
+        script_text = (
+            "---\n"
+            "title: Wi-Fi 感測技術\n"
+            "author: Tech Team\n"
+            "---\n"
+            "# 第一段：開場\n"
+            "標題：不用攝影機也能穿牆看見你？Wi-Fi 感測技術解密\n"
+            "主題：無線訊號感測\n"
+            "大綱：介紹 Wi-Fi CSI 原理與隱私影響\n"
+            "內文：\n"
+            "（鏡頭拉近）\n"
+            "1. 你有想過家裡的無線路由器，其實可以變成隱形雷達嗎？\n"
+            "內文：當無線電波在房間裡反射時，人體移動會改變訊號相位。\n"
+        )
+        blocks = extract_script_blocks(script_text)
+        self.assertEqual(len(blocks), 2)
+        self.assertEqual(blocks[0]["label"], "[Script Block 01]")
+        self.assertIn("你有想過家裡的無線路由器", blocks[0]["raw_text"])
+        self.assertEqual(blocks[1]["label"], "[Script Block 02]")
+        self.assertEqual(blocks[1]["raw_text"], "當無線電波在房間裡反射時，人體移動會改變訊號相位。")
+
+        formatted = format_script_blocks_for_prompt(script_text)
+        formatted_lines = [line for line in formatted.splitlines() if line.strip()]
+        self.assertEqual(len(formatted_lines), 2)
+        self.assertTrue(formatted_lines[0].startswith("[Script Block 01]"))
+        self.assertTrue(formatted_lines[1].startswith("[Script Block 02]"))
+
+    def test_script_coverage_score_handles_asr_typos_and_rejects_short_ng_fragments(self):
+        block_norm = "你有想過家裡的無線路由器其實可以變成隱形雷達嗎"
+        # Full EDL transcript with minor ASR wording differences ("家裡面", "能") embedded in a long text
+        long_selected_norm = (
+            "大家好歡迎回到我們的科技專欄今天要分享一個非常特別的研究"
+            "你有想過家裡面的無線路由器其實能變成隱形雷達嗎"
+            "接下來我們來看看研究團隊是怎麼做到的以及背後的天線原理"
+        )
+        cov_good = _script_block_coverage_score(block_norm, long_selected_norm)
+        self.assertGreaterEqual(cov_good, 0.80)
+
+        # Short aborted NG fragment (only 6 chars spoken before stumbling)
+        short_ng_norm = "你有想過家裡"
+        cov_ng = _script_block_coverage_score(block_norm, short_ng_norm)
+        self.assertLess(cov_ng, 0.35)
 
 
 class TestMicroWindowAnomalyDetectionAndRepair(unittest.TestCase):
@@ -114,6 +164,25 @@ class TestMicroWindowAnomalyDetectionAndRepair(unittest.TestCase):
         self.assertEqual(len(repairs), 1)
         self.assertEqual([c["sentence_ids"] for c in repaired_edl["final_edl"]], [[1], [3], [4], [5]])
 
+    def test_deduplicate_and_sort_clips_enforces_last_take_wins_per_script_block(self):
+        whisper_units = [
+            {"id": 1, "start": 10.0, "end": 18.0, "text": "雙縫實驗證明了微觀粒子同時具備波動性與粒子性", "is_target_speaker": True},
+            {"id": 2, "start": 35.0, "end": 43.0, "text": "雙縫實驗證明了微觀粒子同時具備波動性與粒子性", "is_target_speaker": True},
+            {"id": 3, "start": 45.0, "end": 55.0, "text": "最後請記得訂閱我們的頻道並開啟小鈴鐺", "is_target_speaker": True},
+        ]
+        script_text = (
+            "雙縫實驗證明了微觀粒子同時具備波動性與粒子性\n"
+            "最後請記得訂閱我們的頻道並開啟小鈴鐺\n"
+        )
+        # Out-of-order and duplicate takes for Script Block 01 (id=1 at 10s and id=2 at 35s)
+        raw_clips = [
+            {"clip_id": 1, "topic": "結尾", "sentence_ids": [3], "source_in": 45.0, "source_out": 55.0, "transcript": "最後請記得訂閱我們的頻道並開啟小鈴鐺"},
+            {"clip_id": 2, "topic": "雙縫Take2", "sentence_ids": [2], "source_in": 35.0, "source_out": 43.0, "transcript": "雙縫實驗證明了微觀粒子同時具備波動性與粒子性"},
+            {"clip_id": 3, "topic": "雙縫Take1", "sentence_ids": [1], "source_in": 10.0, "source_out": 18.0, "transcript": "雙縫實驗證明了微觀粒子同時具備波動性與粒子性"},
+        ]
+        deduped = deduplicate_and_sort_clips(raw_clips, whisper_units, script_text=script_text)
+        self.assertEqual([c["sentence_ids"] for c in deduped], [[2], [3]])
+
 
 class TestSanitizeRefinedEdl(unittest.TestCase):
     def test_resolves_overlaps_restores_plosive_tail_and_merges_micro_clips(self):
@@ -154,6 +223,55 @@ class TestSanitizeRefinedEdl(unittest.TestCase):
         self.assertEqual(len(sanitized), 1)
         self.assertEqual(sanitized[0]["sentence_ids"], [1, 2])
         self.assertGreaterEqual(sanitized[0]["source_out"], 10.35)
+
+    def test_prevents_negative_duration_on_out_of_order_or_contained_clips(self):
+        # Simulate an out-of-order earlier clip [10.0, 20.0] appended after [50.0, 90.0]
+        # and a nested inner clip [55.0, 65.0] contained inside [50.0, 90.0]
+        raw_refined = [
+            {
+                "clip_id": 1,
+                "topic": "Main",
+                "sentence_ids": [5, 6],
+                "t_first": 50.1,
+                "t_last": 89.8,
+                "source_in": 50.0,
+                "source_out": 90.0,
+                "duration": 40.0,
+                "cps": 4.0,
+                "transcript": "後段完整的主講內容",
+            },
+            {
+                "clip_id": 2,
+                "topic": "ContainedInner",
+                "sentence_ids": [5],
+                "t_first": 55.1,
+                "t_last": 64.9,
+                "source_in": 55.0,
+                "source_out": 65.0,
+                "duration": 10.0,
+                "cps": 4.0,
+                "transcript": "被包裹的重疊子片段",
+            },
+            {
+                "clip_id": 3,
+                "topic": "OutOfOrderEarlier",
+                "sentence_ids": [1],
+                "t_first": 10.1,
+                "t_last": 19.9,
+                "source_in": 10.0,
+                "source_out": 20.0,
+                "duration": 10.0,
+                "cps": 4.0,
+                "transcript": "前段順序顛倒的片段",
+            },
+        ]
+        sanitized, _ = sanitize_refined_edl(raw_refined, total_dur=120.0)
+        self.assertEqual(len(sanitized), 2)
+        for i, c in enumerate(sanitized):
+            self.assertGreater(c["source_out"], c["source_in"])
+            self.assertGreater(c["duration"], 0.0)
+            if i > 0:
+                self.assertGreaterEqual(c["source_in"], sanitized[i - 1]["source_out"])
 
 
 class TestAuditEdlQuality(unittest.TestCase):

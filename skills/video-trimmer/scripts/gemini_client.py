@@ -155,25 +155,19 @@ def load_prompt_template(prompt_file_candidates):
 
 def format_script_blocks_for_prompt(script_content: str) -> str:
     """
-    Format raw script text into sequential numbered script blocks.
+    Format raw script text into sequential numbered script blocks using the SSOT parser.
 
     ASD-STE100:
-    Split script paragraphs and clauses into numbered anchors ([Script Block 01], ...).
-    Preserve original text inside each block for monotonic alignment.
+    1. Exclude YAML frontmatter and non-spoken metadata lines (such as Title:, Subject:, Outline:).
+    2. Split spoken script clauses into numbered anchors ([Script Block 01], ...).
+    3. Guarantee 100% numbering parity between the Gemini prompt and the EDL auditor.
     """
-    raw_lines = [line.strip() for line in (script_content or "").splitlines() if line.strip()]
-    if not raw_lines:
-        return ""
+    from .edl_auditor import extract_script_blocks
 
-    blocks = []
-    block_idx = 1
-    for line in raw_lines:
-        if line.startswith("#"):
-            blocks.append(f"\n{line}")
-        else:
-            blocks.append(f"[Script Block {block_idx:02d}] {line}")
-            block_idx += 1
-    return "\n".join(blocks)
+    blocks = extract_script_blocks(script_content)
+    if not blocks:
+        return ""
+    return "\n".join(f"{b['label']} {b['raw_text']}" for b in blocks)
 
 
 def build_prompt(prompt_file_candidates, script_path=None, whisper_units=None):

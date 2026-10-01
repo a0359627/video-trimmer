@@ -26,48 +26,167 @@ MIN_MICRO_WINDOW_SEC = 15.0
 MAX_MICRO_WINDOW_SEC = 90.0
 
 
-def _extract_script_blocks(script_text: str | None) -> list[dict]:
+# Document metadata prefixes that represent non-spoken headers (entire line is skipped)
+SCRIPT_METADATA_LINE_PREFIXES = (
+    "標題：", "標題:", "主題：", "主題:", "大綱：", "大綱:",
+    "備註：", "備註:", "說明：", "說明:", "專案：", "專案:",
+    "title:", "subject:", "topic:", "outline:", "author:",
+    "date:", "duration:", "scene:", "note:", "notes:",
+)
+
+# Section label prefixes where the prefix itself is non-spoken, but spoken text may follow on the same line
+SCRIPT_SECTION_LABEL_PREFIXES = (
+    "內文：", "內文:", "講稿：", "講稿:", "腳本：", "腳本:",
+    "台詞：", "台詞:", "旁白：", "旁白:", "口白：", "口白:",
+    "body:", "script:", "narration:", "voiceover:", "vo:",
+)
+
+
+def extract_script_blocks(script_text: str | None) -> list[dict]:
     """
-    Parse raw script text into numbered script block dicts.
+    Parse raw script text into sequential numbered script block dicts.
 
     ASD-STE100:
-    Extract numbered script blocks and normalized text clauses for coverage verification.
+    1. Strip YAML frontmatter (--- ... ---), markdown headings (#), and horizontal rules.
+    2. Exclude non-spoken metadata lines (such as Title, Subject, Outline, Notes).
+    3. Strip section label prefixes (such as Body: or Script:) and stage directions.
+    4. Extract numbered spoken script blocks for Prompt and Auditor alignment.
     """
     if not script_text or not script_text.strip():
         return []
 
-    blocks = []
+    raw_lines = script_text.splitlines()
+    blocks: list[dict] = []
     block_idx = 1
-    for raw_line in script_text.splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
+    in_frontmatter = False
+
+    for line_num, raw_line in enumerate(raw_lines):
+        stripped = raw_line.strip()
+        if line_num == 0 and stripped == "---":
+            in_frontmatter = True
             continue
-        cleaned = re.sub(r"^\s*[#*>\-\d.]+\s*", "", line)
-        cleaned = re.sub(r"（.*?）|\(.*?\)|【.*?】|\[.*?\]", "", cleaned)
+        if in_frontmatter:
+            if stripped in ("---", "..."):
+                in_frontmatter = False
+            continue
+
+        if not stripped or stripped.startswith("#"):
+            continue
+        if re.match(r"^[-=*_]{3,}$", stripped):
+            continue
+
+        # Remove leading markdown list/quote markers before checking metadata prefixes
+        unmarked = re.sub(r"^\s*[>*\-\d.]+\s*", "", stripped).strip()
+        unmarked_lower = unmarked.lower()
+
+        if any(unmarked_lower.startswith(p) for p in SCRIPT_METADATA_LINE_PREFIXES):
+            continue
+
+        for label_prefix in SCRIPT_SECTION_LABEL_PREFIXES:
+            if unmarked_lower.startswith(label_prefix):
+                unmarked = unmarked[len(label_prefix):].strip()
+                break
+
+        if not unmarked:
+            continue
+
+        # Strip inline stage directions / camera cues in brackets
+        cleaned = re.sub(r"（.*?）|\(.*?\)|【.*?】|\[.*?\]", "", unmarked).strip()
         norm = normalize_text(cleaned)
         if len(norm) >= 4:
             blocks.append({
                 "block_id": block_idx,
                 "label": f"[Script Block {block_idx:02d}]",
-                "raw_text": line,
+                "raw_text": unmarked,
                 "norm_text": norm,
             })
-        block_idx += 1
+            block_idx += 1
+
     return blocks
 
 
-def _match_text_similarity(norm_a: str, norm_b: str) -> float:
-    """Return longest contiguous match ratio or sequence ratio between two normalized strings."""
-    if not norm_a or not norm_b:
+# Backward-compatible alias for internal callers and tests
+_extract_script_blocks = extract_script_blocks
+
+
+def _script_block_coverage_score(block_norm: str, target_norm: str) -> float:
+    """
+    Compute the fraction of `block_norm` characters covered in order within `target_norm`.
+
+    ASD-STE100:
+    Always use `len(block_norm)` as the denominator so short aborted NG fragments
+    cannot produce high similarity scores, while complete takes with minor ASR homophone
+    differences achieve high coverage.
+    """
+    if not block_norm or not target_norm:
         return 0.0
-    if norm_a in norm_b or norm_b in norm_a:
+    if block_norm in target_norm:
         return 1.0
-    matcher = difflib.SequenceMatcher(None, norm_a, norm_b)
-    longest = matcher.find_longest_match(0, len(norm_a), 0, len(norm_b))
-    min_len = max(1, min(len(norm_a), len(norm_b)))
-    if longest.size >= 6:
-        return max(matcher.ratio(), longest.size / min_len)
-    return matcher.ratio()
+
+    block_len = len(block_norm)
+    target_len = len(target_norm)
+    min_match_size = 2 if any("\u4e00" <= ch <= "\u9fff" for ch in block_norm) else 3
+
+    def _window_coverage(win_text: str) -> float:
+        if not win_text:
+            return 0.0
+        if block_norm in win_text:
+            return 1.0
+        matcher = difflib.SequenceMatcher(None, block_norm, win_text, autojunk=False)
+        matched_chars = sum(
+            m.size for m in matcher.get_matching_blocks() if m.size >= min_match_size
+        )
+        return min(1.0, matched_chars / block_len)
+
+    if target_len <= block_len * 2:
+        return _window_coverage(target_norm)
+
+    win_size = min(target_len, max(block_len + 24, int(block_len * 1.8)))
+    stride = max(4, block_len // 3)
+    best_score = 0.0
+
+    # Evaluate sliding windows across target_norm
+    for start_idx in range(0, max(1, target_len - win_size + 1), stride):
+        score = _window_coverage(target_norm[start_idx : start_idx + win_size])
+        if score > best_score:
+            best_score = score
+            if best_score >= 0.95:
+                return best_score
+
+    # Evaluate tail window and anchor window around longest contiguous match
+    tail_score = _window_coverage(target_norm[max(0, target_len - win_size) :])
+    best_score = max(best_score, tail_score)
+
+    global_matcher = difflib.SequenceMatcher(None, block_norm, target_norm, autojunk=False)
+    longest = global_matcher.find_longest_match(0, block_len, 0, target_len)
+    if longest.size >= min_match_size:
+        anchor_start = max(0, longest.b - longest.a - 12)
+        anchor_end = min(target_len, anchor_start + win_size)
+        best_score = max(best_score, _window_coverage(target_norm[anchor_start:anchor_end]))
+
+    return best_score
+
+
+def _match_text_similarity(norm_a: str, norm_b: str) -> float:
+    """Return script coverage score of norm_a inside norm_b."""
+    return _script_block_coverage_score(norm_a, norm_b)
+
+
+def _unit_overlaps_script_block(block_norm: str, unit_norm: str) -> bool:
+    """
+    Return True if a single Whisper sentence unit belongs to a script block.
+
+    ASD-STE100:
+    Accept a sentence unit when it covers >= 35% of the script block or when >= 65%
+    of the sentence unit (at least 5 chars) matches a contiguous clause of the script block.
+    """
+    if not block_norm or not unit_norm:
+        return False
+    if _script_block_coverage_score(block_norm, unit_norm) >= 0.35:
+        return True
+    if len(unit_norm) >= 5 and _script_block_coverage_score(unit_norm, block_norm) >= 0.65:
+        return True
+    return False
 
 
 def _resolve_clip_sentence_ids(clip: dict, whisper_units: list[dict]) -> list[int]:
@@ -89,6 +208,107 @@ def _resolve_clip_sentence_ids(clip: dict, whisper_units: list[dict]) -> list[in
     return sorted(set(resolved))
 
 
+def _clip_time_bounds(clip: dict, unit_by_id: dict[int, dict], whisper_units: list[dict]) -> tuple[float, float]:
+    """Return physical (start, end) time bounds for a clip using resolved sentence IDs when available."""
+    sids = _resolve_clip_sentence_ids(clip, whisper_units)
+    t_in = float(clip.get("source_in", 0.0))
+    t_out = float(clip.get("source_out", t_in))
+    if sids:
+        first_u = unit_by_id.get(sids[0])
+        last_u = unit_by_id.get(sids[-1])
+        if first_u is not None:
+            t_in = float(first_u.get("start", t_in))
+        if last_u is not None:
+            t_out = float(last_u.get("end", t_out))
+    return t_in, max(t_in, t_out)
+
+
+def deduplicate_and_sort_clips(
+    clips: list[dict],
+    whisper_units: list[dict],
+    script_text: str | None = None,
+) -> list[dict]:
+    """
+    Sort clips chronologically and enforce Single-Winner (Last-Take-Wins) deduplication.
+
+    ASD-STE100:
+    1. Sort all clips by their physical start time.
+    2. When two clips share sentence IDs, overlap in physical time, or fulfill the same
+       Mode A script block, retain only the later clip (Last Take Wins).
+    """
+    if not clips:
+        return []
+
+    unit_by_id = {int(u["id"]): u for u in whisper_units if "id" in u}
+
+    def _sort_key(c: dict) -> tuple[float, float]:
+        t_in, t_out = _clip_time_bounds(c, unit_by_id, whisper_units)
+        return (t_in, t_out)
+
+    sorted_clips = sorted((dict(c) for c in clips), key=_sort_key)
+    script_blocks = extract_script_blocks(script_text) if script_text else []
+
+    def _matched_script_block_id(c: dict) -> int | None:
+        if not script_blocks:
+            return None
+        sids = _resolve_clip_sentence_ids(c, whisper_units)
+        text = c.get("transcript", "") or ""
+        if not text and sids:
+            text = " ".join(str(unit_by_id[sid].get("text", "")) for sid in sids if sid in unit_by_id)
+        norm = normalize_text(text)
+        if not norm:
+            return None
+        best_blk_id = None
+        best_score = 0.0
+        for blk in script_blocks:
+            score = _script_block_coverage_score(blk["norm_text"], norm)
+            # Only tag a clip to a single script block when it does not span multiple blocks
+            if score >= 0.65 and score > best_score and len(norm) <= len(blk["norm_text"]) * 1.85:
+                best_score = score
+                best_blk_id = blk["block_id"]
+        return best_blk_id
+
+    deduped: list[dict] = []
+    for curr in sorted_clips:
+        curr_sids = set(_resolve_clip_sentence_ids(curr, whisper_units))
+        curr_in, curr_out = _clip_time_bounds(curr, unit_by_id, whisper_units)
+        curr_blk_id = _matched_script_block_id(curr)
+        curr_text = curr.get("transcript", "") or ""
+        if not curr_text and curr_sids:
+            curr_text = " ".join(str(unit_by_id[sid].get("text", "")) for sid in sorted(curr_sids) if sid in unit_by_id)
+
+        # Remove any earlier clip in `deduped` that is superseded by `curr` (Last Take Wins)
+        kept_earlier: list[dict] = []
+        for prev in deduped:
+            prev_sids = set(_resolve_clip_sentence_ids(prev, whisper_units))
+            prev_in, prev_out = _clip_time_bounds(prev, unit_by_id, whisper_units)
+            prev_blk_id = _matched_script_block_id(prev)
+            prev_text = prev.get("transcript", "") or ""
+            if not prev_text and prev_sids:
+                prev_text = " ".join(str(unit_by_id[sid].get("text", "")) for sid in sorted(prev_sids) if sid in unit_by_id)
+
+            shares_sids = bool(curr_sids and prev_sids and curr_sids.intersection(prev_sids))
+            time_overlaps = (curr_in < prev_out - 0.05) and (curr_out > prev_in + 0.05)
+            same_script_block = (curr_blk_id is not None) and (curr_blk_id == prev_blk_id)
+            adjacent_retake = (
+                bool(curr_text and prev_text)
+                and (curr_in - prev_out) <= 25.0
+                and _are_sentences_retake_related(prev_text, curr_text)
+                and same_script_block
+            )
+
+            if shares_sids or time_overlaps or same_script_block or adjacent_retake:
+                continue
+            kept_earlier.append(prev)
+
+        kept_earlier.append(curr)
+        deduped = kept_earlier
+
+    for idx, c in enumerate(deduped, start=1):
+        c["clip_id"] = idx
+    return deduped
+
+
 def detect_micro_window_anomalies(
     model_edl: dict,
     whisper_units: list[dict],
@@ -103,7 +323,8 @@ def detect_micro_window_anomalies(
     Identify three classes of pre-render anomalies:
     1. POTENTIAL_RESIDUAL_RETAKE: Adjacent clips share retake phrasing or overlapping sentence IDs.
     2. UNANCHORED_CLIP: Clip lacks valid Whisper sentence IDs.
-    3. MISSING_SCRIPT_BLOCK: A script block exists in the Whisper transcript but is absent from the EDL.
+    3. MISSING_SCRIPT_BLOCK: A script block exists in a contiguous cluster of Whisper sentences
+       but is absent from the EDL.
     """
     clips = model_edl.get("final_edl", []) if isinstance(model_edl, dict) else []
     if not whisper_units or not clips:
@@ -119,17 +340,8 @@ def detect_micro_window_anomalies(
         sids_curr = _resolve_clip_sentence_ids(c_curr, whisper_units)
         sids_next = _resolve_clip_sentence_ids(c_next, whisper_units)
 
-        t_curr_in = float(c_curr.get("source_in", 0.0))
-        t_curr_out = float(c_curr.get("source_out", t_curr_in))
-        t_next_in = float(c_next.get("source_in", t_curr_out))
-        t_next_out = float(c_next.get("source_out", t_next_in))
-
-        if sids_curr:
-            t_curr_in = float(unit_by_id[sids_curr[0]].get("start", t_curr_in))
-            t_curr_out = float(unit_by_id[sids_curr[-1]].get("end", t_curr_out))
-        if sids_next:
-            t_next_in = float(unit_by_id[sids_next[0]].get("start", t_next_in))
-            t_next_out = float(unit_by_id[sids_next[-1]].get("end", t_next_out))
+        t_curr_in, t_curr_out = _clip_time_bounds(c_curr, unit_by_id, whisper_units)
+        t_next_in, t_next_out = _clip_time_bounds(c_next, unit_by_id, whisper_units)
 
         span_sec = t_next_out - t_curr_in
         if span_sec > MAX_MICRO_WINDOW_SEC or (t_next_in - t_curr_out) > 30.0:
@@ -145,7 +357,6 @@ def detect_micro_window_anomalies(
             is_retake_pair = True
             reason = f"Adjacent clips {idx + 1} and {idx + 2} share overlapping Sentence IDs {sorted(overlap_ids)}."
         elif text_curr and text_next and _are_sentences_retake_related(text_curr, text_next):
-            # Exclude deliberate identical short rhetorical phrases repeated >= 3 times
             is_retake_pair = True
             reason = (
                 f"Adjacent clips {idx + 1} ('{text_curr[:24]}') and {idx + 2} ('{text_next[:24]}') "
@@ -185,33 +396,63 @@ def detect_micro_window_anomalies(
                     "reason": f"Clip {idx + 1} has no valid Whisper sentence_ids and requires exact sentence anchoring.",
                 })
 
-    # 3. Mode A: Check for missed script blocks that exist in Whisper units
+    # 3. Mode A: Check for missed script blocks that exist in contiguous unselected Whisper clusters
     if script_text and len(anomalies) < MAX_MICRO_WINDOW_REPAIRS:
-        blocks = _extract_script_blocks(script_text)
+        blocks = extract_script_blocks(script_text)
         selected_sids = set()
+        selected_texts: list[str] = []
         for c in clips:
-            selected_sids.update(_resolve_clip_sentence_ids(c, whisper_units))
-        selected_norm_text = " ".join(
-            normalize_text(c.get("transcript", "")) for c in clips
-        )
+            c_sids = _resolve_clip_sentence_ids(c, whisper_units)
+            selected_sids.update(c_sids)
+            c_text = c.get("transcript", "") or ""
+            if not c_text and c_sids:
+                c_text = " ".join(str(unit_by_id[sid].get("text", "")) for sid in c_sids if sid in unit_by_id)
+            selected_texts.append(normalize_text(c_text))
+        selected_norm_text = " ".join(t for t in selected_texts if t)
 
         for blk in blocks:
             if len(anomalies) >= MAX_MICRO_WINDOW_REPAIRS:
                 break
-            if _match_text_similarity(blk["norm_text"], selected_norm_text) >= 0.55:
+            if _script_block_coverage_score(blk["norm_text"], selected_norm_text) >= 0.55:
                 continue
 
-            # Find candidate Whisper sentences that match this missing script block
+            # Find unselected Whisper units that overlap this script block
             cand_units = [
                 u for u in whisper_units
                 if int(u.get("id", 0)) not in selected_sids
-                and _match_text_similarity(blk["norm_text"], normalize_text(u.get("text", ""))) >= 0.50
+                and _unit_overlaps_script_block(blk["norm_text"], normalize_text(u.get("text", "")))
             ]
             if not cand_units:
                 continue
 
-            win_start = max(0.0, float(cand_units[0].get("start", 0.0)) - 4.0)
-            win_end = min(total_dur, max(win_start + MIN_MICRO_WINDOW_SEC, float(cand_units[-1].get("end", 0.0)) + 4.0))
+            # Group candidate units into temporal clusters (split when gap > 12.0s)
+            clusters: list[list[dict]] = []
+            for u in cand_units:
+                if not clusters:
+                    clusters.append([u])
+                else:
+                    prev_end = float(clusters[-1][-1].get("end", 0.0))
+                    curr_start = float(u.get("start", 0.0))
+                    if (curr_start - prev_end) <= 12.0:
+                        clusters[-1].append(u)
+                    else:
+                        clusters.append([u])
+
+            # Evaluate each cluster's coverage of the missing script block; pick latest valid cluster
+            valid_clusters: list[tuple[float, list[dict]]] = []
+            for cl in clusters:
+                cl_norm = "".join(normalize_text(u.get("text", "")) for u in cl)
+                cov = _script_block_coverage_score(blk["norm_text"], cl_norm)
+                if cov >= 0.50:
+                    valid_clusters.append((cov, cl))
+
+            if not valid_clusters:
+                continue
+
+            # Last-Take-Wins: prefer the latest qualifying cluster
+            _, chosen_cluster = valid_clusters[-1]
+            win_start = max(0.0, float(chosen_cluster[0].get("start", 0.0)) - 4.0)
+            win_end = min(total_dur, max(win_start + MIN_MICRO_WINDOW_SEC, float(chosen_cluster[-1].get("end", 0.0)) + 4.0))
             if (win_end - win_start) <= MAX_MICRO_WINDOW_SEC:
                 anomalies.append({
                     "type": "MISSING_SCRIPT_BLOCK",
@@ -234,7 +475,7 @@ def repair_edl_micro_windows(
 ) -> tuple[dict, list[dict]]:
     """
     Execute targeted micro-window re-scans for detected pre-render anomalies and splice
-    repaired clips back into model_edl.
+    repaired clips back into model_edl with Single-Winner (Last-Take-Wins) arbitration.
 
     ASD-STE100:
     Re-scan only short 15-to-90s video windows to avoid gateway timeouts.
@@ -314,18 +555,11 @@ def repair_edl_micro_windows(
         })
 
     if applied_repairs:
-        # Sort all clips chronologically by their first resolved sentence start time or source_in
-        unit_by_id = {int(u["id"]): u for u in whisper_units if "id" in u}
-
-        def _clip_sort_key(c: dict) -> float:
-            sids = _resolve_clip_sentence_ids(c, whisper_units)
-            if sids and sids[0] in unit_by_id:
-                return float(unit_by_id[sids[0]].get("start", 0.0))
-            return float(c.get("source_in", 0.0))
-
-        clips.sort(key=_clip_sort_key)
-        for idx, c in enumerate(clips, start=1):
-            c["clip_id"] = idx
+        clips = deduplicate_and_sort_clips(
+            clips=clips,
+            whisper_units=whisper_units,
+            script_text=script_text,
+        )
 
     updated_edl = dict(model_edl)
     updated_edl["final_edl"] = clips
@@ -342,9 +576,10 @@ def sanitize_refined_edl(
     Sanitize physical clip timings after acoustic boundary locking and before NLE/MP4 export.
 
     ASD-STE100:
-    1. Enforce source_out >= t_last so final consonants are never truncated.
-    2. Resolve micro-overlaps between adjacent clips at their physical midpoint.
+    1. Sort clips chronologically and enforce source_out >= t_last so final consonants are preserved.
+    2. Prune contained or backward-jumping redundant clips and resolve micro-overlaps at their midpoint.
     3. Merge flash-frame micro-clips (< 0.45s) into adjacent clips when gap < 0.35s.
+    4. Guarantee strict forward monotonicity (source_in < source_out and c[i].source_out <= c[i+1].source_in).
     """
     stats = {
         "overlaps_resolved": 0,
@@ -358,8 +593,8 @@ def sanitize_refined_edl(
 
     # 1. Enforce source_bounds and plosive tail protection (source_out >= t_last)
     for c in sanitized:
-        s_in = max(0.0, float(c.get("source_in", 0.0)))
-        s_out = min(total_dur, float(c.get("source_out", s_in + 0.5)))
+        s_in = max(0.0, min(total_dur, float(c.get("source_in", 0.0))))
+        s_out = max(0.0, min(total_dur, float(c.get("source_out", s_in + 0.5))))
         t_last = c.get("t_last")
         if t_last is not None and s_out < float(t_last):
             s_out = min(total_dur, round(float(t_last) + 0.04, 2))
@@ -370,34 +605,61 @@ def sanitize_refined_edl(
         c["source_out"] = round(s_out, 2)
         c["duration"] = round(c["source_out"] - c["source_in"], 2)
 
-    # 2. De-conflict adjacent micro-overlaps
-    for i in range(1, len(sanitized)):
-        prev_c = sanitized[i - 1]
-        curr_c = sanitized[i]
+    # Sort strictly by (source_in, source_out) before overlap resolution
+    sanitized.sort(key=lambda c: (float(c["source_in"]), float(c["source_out"])))
+
+    # 2. De-conflict adjacent overlaps and prune nested/contained redundant clips
+    deconflicted: list[dict] = []
+    for curr_c in sanitized:
+        if not deconflicted:
+            if curr_c["source_out"] > curr_c["source_in"]:
+                deconflicted.append(curr_c)
+            continue
+
+        prev_c = deconflicted[-1]
+        # If curr_c is completely contained within prev_c, drop the redundant inner clip
+        if curr_c["source_out"] <= prev_c["source_out"] + 0.05:
+            stats["overlaps_resolved"] += 1
+            continue
+
         if curr_c["source_in"] < prev_c["source_out"]:
             mid = round((prev_c["source_out"] + curr_c["source_in"]) / 2.0, 2)
             prev_t_last = float(prev_c.get("t_last", prev_c["source_in"] + 0.2))
             curr_t_first = float(curr_c.get("t_first", curr_c["source_in"]))
             boundary = max(prev_t_last, min(curr_t_first, mid))
-            prev_c["source_out"] = round(boundary, 2)
-            curr_c["source_in"] = round(boundary, 2)
-            prev_c["duration"] = round(max(0.10, prev_c["source_out"] - prev_c["source_in"]), 2)
-            curr_c["duration"] = round(max(0.10, curr_c["source_out"] - curr_c["source_in"]), 2)
+
+            # Clamp boundary so both prev_c and curr_c maintain strictly positive durations (>= 0.15s)
+            min_valid_boundary = prev_c["source_in"] + 0.15
+            max_valid_boundary = curr_c["source_out"] - 0.15
+            if max_valid_boundary < min_valid_boundary:
+                # Span is too narrow for two distinct clips; drop the redundant second clip
+                stats["overlaps_resolved"] += 1
+                continue
+
+            boundary = round(max(min_valid_boundary, min(max_valid_boundary, boundary)), 2)
+            prev_c["source_out"] = boundary
+            curr_c["source_in"] = boundary
+            prev_c["duration"] = round(prev_c["source_out"] - prev_c["source_in"], 2)
+            curr_c["duration"] = round(curr_c["source_out"] - curr_c["source_in"], 2)
             stats["overlaps_resolved"] += 1
+
+        if curr_c["source_out"] - curr_c["source_in"] >= 0.15:
+            deconflicted.append(curr_c)
 
     # 3. Coalesce micro-clips (< min_clip_dur) into adjacent clips if gap < merge_gap_thresh
     merged: list[dict] = []
-    for c in sanitized:
+    for c in deconflicted:
         if (
             merged
             and (c["duration"] < min_clip_dur or merged[-1]["duration"] < min_clip_dur)
+            and c["source_out"] > merged[-1]["source_out"]
             and 0.0 <= (c["source_in"] - merged[-1]["source_out"]) <= merge_gap_thresh
         ):
             prev = merged[-1]
             prev["source_out"] = c["source_out"]
             prev["duration"] = round(prev["source_out"] - prev["source_in"], 2)
             if c.get("t_last") is not None:
-                prev["t_last"] = c["t_last"]
+                prev["t_last"] = max(float(prev.get("t_last") or 0.0), float(c["t_last"]))
             prev_sids = list(prev.get("sentence_ids") or [])
             for sid in (c.get("sentence_ids") or []):
                 if sid not in prev_sids:
@@ -409,12 +671,17 @@ def sanitize_refined_edl(
         else:
             merged.append(c)
 
-    for idx, c in enumerate(merged, start=1):
-        c["clip_id"] = idx
-        c["duration"] = round(c["source_out"] - c["source_in"], 2)
-        c["cps"], _ = calculate_clip_cps(c.get("transcript", ""), c["duration"])
+    final_clips: list[dict] = []
+    for c in merged:
+        dur = round(float(c["source_out"]) - float(c["source_in"]), 2)
+        if dur <= 0.0:
+            continue
+        c["duration"] = dur
+        c["clip_id"] = len(final_clips) + 1
+        c["cps"], _ = calculate_clip_cps(c.get("transcript", ""), dur)
+        final_clips.append(c)
 
-    return merged, stats
+    return final_clips, stats
 
 
 def audit_edl_quality(

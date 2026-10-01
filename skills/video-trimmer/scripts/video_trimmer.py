@@ -44,6 +44,7 @@ from .acoustic import refine_speech_bounds_locked
 from .constants import ALLOWED_INPUT_EXTENSIONS
 from .edl_auditor import (
     audit_edl_quality,
+    deduplicate_and_sort_clips,
     generate_edl_audit_markdown,
     repair_edl_micro_windows,
     sanitize_refined_edl,
@@ -359,6 +360,13 @@ def _run(args):
     subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
+
+    if whisper_units and isinstance(model_edl, dict) and model_edl.get("final_edl"):
+        model_edl["final_edl"] = deduplicate_and_sort_clips(
+            clips=model_edl["final_edl"],
+            whisper_units=whisper_units,
+            script_text=script_text,
+        )
 
     expanded_units = []
     for c in model_edl.get("final_edl", []):
