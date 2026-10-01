@@ -33,7 +33,7 @@
 5. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
    - Places cut-in points 80 ms before vocal cord vibration and dynamically calculates lead-in/lead-out margins from presenter Characters Per Second (CPS) while enforcing `true_speech_end >= t_last`.
 6. **15 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
-   - Uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`) to skip discarded footage without decoding it, combined with Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15 ms equal-power micro-fades (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=oqsin`) at every cut boundary.
+   - Uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`) to skip discarded footage without decoding it, combined with Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15 ms equal-power micro-fades (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=qsin`) at every cut boundary.
 7. **Multi-NLE Timeline Interoperability (`exporters.py`)**:
    - Exports frame-accurate **Final Cut Pro 7 XML** (`.xml` for Adobe Premiere Pro and DaVinci Resolve), **Apple Final Cut Pro FCPXML** (`.fcpxml`), **CMX 3600 EDL** (`.edl`), and **CSV** cut lists across standard frame rates (`23.976` to `60` fps).
 

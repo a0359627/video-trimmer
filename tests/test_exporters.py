@@ -138,7 +138,8 @@ class TestRenderCutVideo(unittest.TestCase):
         self.assertIn("-hwaccel videotoolbox -ss 10.000 -to 15.000 -i raw_footage.mp4", cmd_str)
         self.assertIn("-hwaccel videotoolbox -ss 20.000 -to 27.500 -i raw_footage.mp4", cmd_str)
         self.assertIn("curve=iqsin", cmd_str)
-        self.assertIn("curve=oqsin", cmd_str)
+        self.assertIn("curve=qsin", cmd_str)
+        self.assertNotIn("curve=oqsin", cmd_str)
         self.assertIn("-c:v h264_videotoolbox -b:v 12M -g 30", cmd_str)
         self.assertIn("-movflags +faststart", cmd_str)
 

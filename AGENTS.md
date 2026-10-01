@@ -45,7 +45,7 @@ When modifying code, prompts, infrastructure scripts, or documentation in this r
 
 ### 3. Multi-NLE Timeline Interoperability & Acoustic Integrity
 - **Universal NLE Support**: [exporters.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/exporters.py) produces frame-accurate timelines for Apple Final Cut Pro (`.fcpxml`), Adobe Premiere Pro (`.xml`), DaVinci Resolve (`.xml` / `.fcpxml`), CMX 3600 (`.edl`), and CSV (`.csv`) across standard broadcast and cinema frame rates (`23.976` to `60` fps).
-- **Audio Pop Protection (`15ms` Equal-Power Micro-Crossfade)**: Every rendered cut boundary in [render.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/render.py) must apply a `15ms` equal-power micro-fade (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=oqsin`).
+- **Audio Pop Protection (`15ms` Equal-Power Micro-Crossfade)**: Every rendered cut boundary in [render.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/render.py) must apply a `15ms` equal-power micro-fade (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=qsin`).
 - **Speech Boundary Tightening**: [acoustic.py](file:///Users/sylph/Documents/Antigravity/video-trimmer/skills/video-trimmer/scripts/acoustic.py) dynamically calculates lead-in and lead-out margins from presenter CPS without truncating spoken phonemes.
 
 ### 4. 100% Google Cloud Vertex AI (ADC) + GCS Architecture

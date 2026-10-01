@@ -26,7 +26,7 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Execute the workflow defined in `skills/video-trimmer/SKILL.md`.
 - Pass `-s <SCRIPT_FILE>` whenever the user provides a reference shooting script or outline to activate Mode A (Monotonic Script-Anchored Alignment); omit `-s` for unscripted recordings to activate Mode B (Unscripted Intent-Window Arbitration).
 - All cut points and keep-ranges must respect the Whisper word-level acoustic ground truth (`word_timestamps=True`), onset snapping, and `Sentence ID` boundaries.
-- Do NOT truncate speech phonemes or spoken words. Maintain dynamic speech padding and 15ms equal-power audio micro-crossfades (`iqsin`/`oqsin`) to eliminate audio pop artifacts.
+- Do NOT truncate speech phonemes or spoken words. Maintain dynamic speech padding and 15ms equal-power audio micro-crossfades (`iqsin`/`qsin`) to eliminate audio pop artifacts.
 
 ## 5. Default Static Multimodal Execution
 - Run `video_trimmer.py` in `<PLUGIN_ROOT>` in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) for fast, timeout-free inference.

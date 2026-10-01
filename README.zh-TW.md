@@ -32,7 +32,7 @@
 5. **聲學起音鎖定與字尾塞音保護 (`acoustic.py`)**：
    - 將剪輯入點鎖定於聲帶發聲前 80 ms，並依據講者語速（CPS）動態計算緩衝邊界，強制 `true_speech_end >= t_last` 以保護字尾無聲除阻音與鼻音。
 6. **15 ms 等功率音訊微淡化與關鍵幀硬體加速渲染 (`render.py`)**：
-   - 每個保留片段採用前置 `-ss` / `-to` 關鍵幀快速定位（Fast Input Seeking，免除廢片區段解碼），結合 Apple Silicon `VideoToolbox` 硬體編解碼（`-hwaccel videotoolbox` + `h264_videotoolbox`，具備 `libx264` 自動降級備援）、1 秒關鍵幀間距（`-g 30`）與 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 與 `afade=t=out:d=0.015:curve=oqsin`），消除跳接爆音並大幅提升成片渲染與快轉速度。
+   - 每個保留片段採用前置 `-ss` / `-to` 關鍵幀快速定位（Fast Input Seeking，免除廢片區段解碼），結合 Apple Silicon `VideoToolbox` 硬體編解碼（`-hwaccel videotoolbox` + `h264_videotoolbox`，具備 `libx264` 自動降級備援）、1 秒關鍵幀間距（`-g 30`）與 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 與 `afade=t=out:d=0.015:curve=qsin`），消除跳接爆音並大幅提升成片渲染與快轉速度。
 7. **多平台 NLE 時間軸匯出 (`exporters.py`)**：
    - 支援匯出 **Final Cut Pro 7 XML**（`.xml`，適用於 Adobe Premiere Pro 與 DaVinci Resolve）、**Apple Final Cut Pro FCPXML**（`.fcpxml`）、**CMX 3600 EDL**（`.edl`）與 **CSV** 剪輯表。
 

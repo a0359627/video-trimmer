@@ -27,7 +27,7 @@
 4. **レイヤー 4：グローバル・クリップ間結合 (`coalesce_adjacent_sub_units`)**：
    - 隣接クリップが連続する `Sentence ID` であり、単語間ギャップが `< 0.40s` の場合、単一の連続クリップに自動統合し、文中の不自然なジャンプカットを排除します。
 5. **音響オンセット・スナッピング、15 ms 等パワー音声マイクロクロスフェード＆キーフレーム・ハードウェア高速レンダリング (`acoustic.py` / `render.py`)**：
-   - 声帯振動の 80 ms 前にカット点を配置し、各クリップで `-ss` / `-to` 前置キーフレーム高速シーク（NG 区間のデコード省略）、Apple Silicon `VideoToolbox` ハードウェア加減速（`-hwaccel videotoolbox` + `h264_videotoolbox`、`libx264` 自動フォールバック付き）、1 秒 GOP（`-g 30`）、および 15 ms マイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=oqsin`）を適用します。
+   - 声帯振動の 80 ms 前にカット点を配置し、各クリップで `-ss` / `-to` 前置キーフレーム高速シーク（NG 区間のデコード省略）、Apple Silicon `VideoToolbox` ハードウェア加減速（`-hwaccel videotoolbox` + `h264_videotoolbox`、`libx264` 自動フォールバック付き）、1 秒 GOP（`-g 30`）、および 15 ms マイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=qsin`）を適用します。
 6. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力**：
    - コアスクリプトとプロンプトは `skills/video-trimmer/scripts/` および `skills/video-trimmer/prompts/`（SSOT）に配置され、ルート直下のシンボリックリンクを持たない純粋な構成と 2 層 `AGENTS.md` / `rules/AGENTS.md` を備えています。**FCP7 XML**、**FCPXML**、**CMX 3600 EDL**、**CSV** を出力します。
 
