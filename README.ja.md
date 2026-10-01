@@ -11,24 +11,24 @@
 
 ## 概要 (Overview)
 
-**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 3.8 Flash** のマルチモーダル動画推論、**Whisper 単語レベル音響タイムスタンプ**（`mlx-whisper`）、**4 レイヤー統合アーキテクチャ**、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや言い淀み、無音区間を自動除去しながら自然な連続発話を維持し、NLE タイムライン（`.xml`, `.fcpxml`, `.edl`, `.csv`）と MP4 動画を出力します。
+**Video Trimmer** は、トーク動画、チュートリアル、プレゼンテーション録画向けの AI 自動ラフカット＆トリミングエンジンです。**Google Vertex AI Gemini 3.8 Flash** のマルチモーダル動画推論、**Whisper 単語レベル音響タイムスタンプ**（`mlx-whisper`）、**5 レイヤー統合アーキテクチャ**、および **音響オンセット・スナッピング** を組み合わせ、NG テイクや言い淀み、無音区間を自動除去しながら自然な連続発話を維持し、NLE タイムライン（`.xml`, `.fcpxml`, `.edl`, `.csv`）、8 次元品質監査レポート（`.md`, `.json`）、および MP4 動画を出力します。
 
 ---
 
-## 4 レイヤー統合アーキテクチャと主な機能
+## 5 レイヤー統合アーキテクチャと主な機能
 
 1. **レイヤー 1：純音響・句読点ベースの節分割 (`transcribe.py`)**：
    - 息継ぎ休止（`gap >= 0.20s`）、言い淀みによる長音化（`word_dur >= 1.20s`）、句読点閉鎖、および話者交替の物理境界のみで `Sentence ID` を分割し、微細休止（`gap < 0.25s`）を跨ぐ接続詞結合（`CONJUNCTIONS`）を保持します。Python 側の文字列類似度によるリテイク推測は一切行いません。
-2. **レイヤー 2：デュアルモード LLM テイク選定 (`gemini-3.8-flash`)**：
-   - **Mode A：スクリプトアンカー単調アライメント（`--script` 指定時）**：台本を `[Script Block 01] .. [Script Block NN]` に分割し、単調順序で各ブロック最大 1 つの最終成功テイクのみを採用します。
+2. **レイヤー 2：デュアルモード LLM テイク選定＆局所マイクロウィンドウ再スキャン (`gemini_client.py` / `edl_auditor.py`)**：
+   - **Mode A：スクリプトアンカー単調アライメント（`--script` 指定時）**：単一情報源（SSOT）パーサー（`extract_script_blocks`）により YAML フロントマター、ト書き、非発話メタデータ行（`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：` など）を除外して `[Script Block 01] .. [Script Block NN]` に整形し、プロンプトと監査器の間で 100% 番号を一致させ、各ブロック最大 1 つの最終成功テイクのみを採用します（`Last-Take-Wins`）。
    - **Mode B：台本なしインテントウィンドウ調停（`--script` 省略時）**：途中放棄された断片（Abandoned Fragment）を除去しつつ、意図的な反復強調表現（3 回繰り返す強調など）を保護します。
-   - **局所マイクロウィンドウ再スキャン（Surgical Micro-Window Repair、`edl_auditor.py`）**：FFmpeg レンダリング前に、台本ブロックの欠落（Mode A）、`Sentence ID` 未紐付けクリップ、または隣接リテイク候補を検出し、該当する `15s–90s` の短区間のみを `VideoMetadata` で再スキャンしてタイムアウトを回避します。
+   - **局所マイクロウィンドウ再スキャン＆部分列カバレッジ評価（`edl_auditor.py`）**：台本ブロック長 `len(block_norm)` を唯一の分母としてカバレッジを算出し（`_script_block_coverage_score`）、同音異義語を許容しつつ短い NG 断片の誤検出を防止します。未選択の候補文を時間クラスタリングし、該当する `15s–90s` の短区間のみを `VideoMetadata` で再スキャン後、`deduplicate_and_sort_clips` で `Last-Take-Wins` 重複排除を適用します。
 3. **レイヤー 3：サブユニット展開と単語境界トリミング (`resolve_clip_sub_units`)**：
    - 複数文の範囲を個別の `Sentence ID` に展開し、`transcript` に合わせて語頭・語尾の Whisper 単語境界（`_trim_matched_words_by_transcript`）を精密に整列させます。
 4. **レイヤー 4：グローバル・クリップ間結合 (`coalesce_adjacent_sub_units`)**：
    - 隣接クリップが連続する `Sentence ID` であり、単語間ギャップが `< 0.40s` の場合、単一の連続クリップに自動統合し、文中の不自然なジャンプカットを排除します。
 5. **レイヤー 5：決定論的タイムライン自己修復＆ 8 次元品質監査 (`edl_auditor.py`)**：
-   - 境界の微小重複解消、`source_out >= t_last` の保証、`< 0.45s` のマイクロクリップ統合を行い、`agent_verdict` 品質ゲート付きの監査レポート（`_edl_report.md` / `_edl_report.json`）を出力します。
+   - 時系列の厳密な単調増加（`source_in < source_out` および `c[i].source_out <= c[i+1].source_in`）を強制し、内包された冗長クリップの除去、境界の微小重複解消、`source_out >= t_last` の保証、`< 0.45s` のマイクロクリップ統合を行い、`agent_verdict` 品質ゲート付きの監査レポート（`_edl_report.md` / `_edl_report.json`）を出力します。
 6. **音響オンセット・スナッピング、15 ms 等パワー音声マイクロクロスフェード＆キーフレーム・ハードウェア高速レンダリング (`acoustic.py` / `render.py`)**：
    - 声帯振動の 80 ms 前にカット点を配置し、各クリップで `-ss` / `-to` 前置キーフレーム高速シーク（NG 区間のデコード省略）、Apple Silicon `VideoToolbox` ハードウェア加減速（`-hwaccel videotoolbox` + `h264_videotoolbox`、`libx264` 自動フォールバック付き）、1 秒 GOP（`-g 30`）、および 15 ms マイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=qsin`）を適用します。
 7. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力**：

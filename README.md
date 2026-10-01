@@ -11,27 +11,27 @@
 
 ## Overview
 
-**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Whisper Word-Level Acoustic Ground Truth** (`mlx-whisper`), a **4-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, stutters, and dead air without truncating continuous speech, then exports NLE project timelines (`.xml`, `.fcpxml`, `.edl`, `.csv`) and a rendered MP4 video.
+**Video Trimmer** is an automated video rough-cut and trimming engine for talking-head recordings, tutorials, and presentations. It combines **Google Vertex AI Gemini 3.8 Flash** multimodal video reasoning with **Whisper Word-Level Acoustic Ground Truth** (`mlx-whisper`), a **5-Layer Unified Architecture**, and **Acoustic Onset Snapping**. Each run removes bad takes, stutters, and dead air without truncating continuous speech, then exports NLE project timelines (`.xml`, `.fcpxml`, `.edl`, `.csv`), an 8-dimension quality audit report (`.md`, `.json`), and a rendered MP4 video.
 
 ---
 
-## 4-Layer Unified Architecture & Core Capabilities
+## 5-Layer Unified Architecture & Core Capabilities
 
 1. **Layer 1 — Pure Acoustic & Punctuation Clause Segmentation (`transcribe.py`)**:
    - Extracts phoneme-aligned word timestamps via Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA).
    - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`) across micro-pauses (`gap < 0.25 s`).
    - Enforces a strict **Zero Python String-Similarity Rule**: Python never guesses semantic retakes via character overlap; semantic arbitration belongs exclusively to the LLM.
-2. **Layer 2 — Dual-Mode LLM Take Arbitration (`gemini-3.8-flash`)**:
-   - **Mode A: Monotonic Script-Anchored Alignment (`--script`)**: Formats the reference script into `[Script Block 01] .. [Script Block NN]` and selects at most one final complete take per script block in strict monotonic order.
+2. **Layer 2 — Dual-Mode LLM Take Arbitration & Surgical Micro-Window Repair (`gemini_client.py` / `edl_auditor.py`)**:
+   - **Mode A: Monotonic Script-Anchored Alignment (`--script`)**: Parses the reference script with a Single Source of Truth (SSOT) parser (`extract_script_blocks`) that strips YAML frontmatter, stage directions, and non-spoken metadata headers (`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：`). Formats spoken lines into `[Script Block 01] .. [Script Block NN]` with 100% numbering parity between the Gemini prompt and the EDL auditor, and retains at most one final complete take per block (`Last-Take-Wins`).
    - **Mode B: Unscripted Intent-Window Arbitration (No `--script`)**: Groups consecutive clauses into semantic intent windows, prunes abandoned fragments and false starts, and preserves intentional rhetorical repetition (e.g., three-part emphasis).
-   - **Surgical Micro-Window Repair (`edl_auditor.py`)**: Before video rendering, detects any missed script blocks (Mode A), unanchored clips, or adjacent retake candidates and re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, avoiding full-video gateway timeouts.
+   - **Surgical Micro-Window Repair & Subsequence Coverage (`edl_auditor.py`)**: Evaluates Mode A coverage with `len(block_norm)` as the sole denominator (`_script_block_coverage_score`) to tolerate minor ASR homophone differences while rejecting short aborted NG fragments. Clusters unselected candidate sentences by time proximity, re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, and applies `deduplicate_and_sort_clips` (`Last-Take-Wins`).
 3. **Layer 3 — Sub-Unit Expansion & Transcript Word-Boundary Trimming (`resolve_clip_sub_units`)**:
    - Expands multi-sentence spans into individual `Sentence ID` sub-units so dropped NG sentences inside a time window are excluded.
    - Aligns `t_first` and `t_last` to the exact Whisper word boundaries of `clip_data["transcript"]` (`_trim_matched_words_by_transcript`) when the LLM trims a boundary stumble.
 4. **Layer 4 — Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`)**:
    - Merges consecutive `Sentence ID`s across adjacent EDL clips when the physical inter-word gap is `< 0.40 s` and no `Sentence ID` was skipped, eliminating artificial internal jump-cuts and redundant micro-fades inside continuous sentences.
 5. **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Quality Audit (`edl_auditor.py`)**:
-   - Enforces `source_out >= t_last`, resolves boundary micro-overlaps, merges `< 0.45 s` flash-frame micro-clips, and generates an 8-dimension rough-cut audit report (`_edl_report.md` and `_edl_report.json`) with a top-level `agent_verdict` quality gate.
+   - Enforces strict chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), prunes nested/contained redundant clips, guarantees `source_out >= t_last` (plosive tail floor), merges `< 0.45 s` flash-frame micro-clips, and generates an 8-dimension rough-cut audit report (`_edl_report.md` and `_edl_report.json`) with a top-level `agent_verdict` quality gate.
 6. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
    - Places cut-in points 80 ms before vocal cord vibration and dynamically calculates lead-in/lead-out margins from presenter Characters Per Second (CPS) while enforcing `true_speech_end >= t_last`.
 7. **15 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
@@ -72,7 +72,7 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (91 tests)
+└── tests/                                   # Offline unit test suite (95 tests)
 ```
 
 ---
@@ -209,7 +209,7 @@ For an input video `raw_footage.mp4`, the tool automatically creates an `output/
 
 ## Unit Testing
 
-Run the offline test suite (83 tests) before committing changes:
+Run the offline test suite (95 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

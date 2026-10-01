@@ -11,24 +11,24 @@
 
 ## 项目概览 (Overview)
 
-**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**Whisper 逐字声学时间戳**（`mlx-whisper`）、**四层统一剪辑架构（4-Layer Unified Architecture）** 与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、口误与静音停顿，同时保护连贯长句不被切碎，并导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.edl`, `.csv`）及渲染完成的 MP4 视频。
+**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**Whisper 逐字声学时间戳**（`mlx-whisper`）、**五层统一剪辑架构（5-Layer Unified Architecture）** 与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、口误与静音停顿，同时保护连贯长句不被切碎，并导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.edl`, `.csv`）、8 维度质量审计报告（`.md`, `.json`）及渲染完成的 MP4 视频。
 
 ---
 
-## 四层统一剪辑架构与核心技术能力
+## 五层统一剪辑架构与核心技术能力
 
 1. **第一层：纯声学与标点子句切分 (`transcribe.py`)**：
    - 仅依据物理边界切分 `Sentence ID`：换气停顿（`gap >= 0.20s`）、吃螺丝拉长音起音（`word_dur >= 1.20s`）、句尾标点与说话人轮替，同时保留微停顿（`gap < 0.25s`）下的连词黏合（`CONJUNCTIONS`）。绝不在 Python 中使用字符串相似度猜测 NG 重录。
-2. **第二层：双模式 LLM 语义择优 (`gemini-3.8-flash`)**：
-   - **Mode A：有讲稿单调锚定模式（传入 `--script`）**：将讲稿格式化为 `[Script Block 01] .. [Script Block NN]`，严格依序单调对齐，每个讲稿段落最多保留最后一次完整成功的 Take。
+2. **第二层：双模式 LLM 语义择优与局部微视窗精准重扫 (`gemini_client.py` / `edl_auditor.py`)**：
+   - **Mode A：有讲稿单调锚定模式（传入 `--script`）**：通过单一真相来源（SSOT）解析器（`extract_script_blocks`）自动过滤 YAML Frontmatter、舞台指示与非口播元数据行（如 `标题：`、`主题：`、`大纲：`、`内文：`、`Title:`、`Subject:`、`Outline:`），将口播台词格式化为 `[Script Block 01] .. [Script Block NN]`，确保提示词与审计器编号 100% 一致，且每个段落最多保留最后一次完整成功的 Take（`Last-Take-Wins`）。
    - **Mode B：无讲稿意图视窗仲裁模式（未传 `--script`）**：剔除未完成残句重录（Abandoned Fragment），同时保护刻意修辞排比强调（如三遍重复强调）。
-   - **局部小视窗精准重扫（Surgical Micro-Window Repair，`edl_auditor.py`）**：在进入 FFmpeg 渲染前，自动检测遗漏的讲稿段落（Mode A）、未绑定 `Sentence ID` 的片段或相邻疑似重录句，并仅针对该 `15s–90s` 局部视频视窗通过 `VideoMetadata` 发起单次重扫修补，避免全片 Timeout。
+   - **局部小视窗精准重扫与子序列覆盖率评估（`edl_auditor.py`）**：以完整讲稿段落长度为唯一分母计算覆盖率（`_script_block_coverage_score`），容忍同音字差异并拒绝短 NG 残句误判；将未入选候选句按时间聚类后，仅针对 `15s–90s` 局部视窗通过 `VideoMetadata` 发起单次重扫，并执行 `deduplicate_and_sort_clips`（`Last-Take-Wins` 去重）。
 3. **第三层：子句展开与逐字稿边界精修 (`resolve_clip_sub_units`)**：
    - 将多句跨度展开为独立的 `Sentence ID` 子单元，并依据 `transcript` 自动精修首尾词边界（`_trim_matched_words_by_transcript`）。
 4. **第四层：跨片段连贯小句无缝合一 (`coalesce_adjacent_sub_units`)**：
    - 当相邻片段为连续 `Sentence ID` 且物理字间距 `< 0.40s` 时，自动合并为单一连续片段，消除长句内部的跳接（Jump-Cut）。
 5. **第五层：物理时间轴确定性自愈与 8 维度质量审计 (`edl_auditor.py`)**：
-   - 自动消除相邻边界微重叠、强制保底 `source_out >= t_last`、合并 `< 0.45s` 闪帧微碎切，并生成 `<base>_<tag>_edl_report.md` 与含顶层 `agent_verdict` 质量门禁的 `<base>_<tag>_edl_report.json`。
+   - 强制按时间单调递增排序（`source_in < source_out` 且 `c[i].source_out <= c[i+1].source_in`）、剔除被包裹的冗余子片段、消除相邻边界微重叠、强制保底 `source_out >= t_last`、合并 `< 0.45s` 闪帧微碎切，并生成 `<base>_<tag>_edl_report.md` 与含顶层 `agent_verdict` 质量门禁的 `<base>_<tag>_edl_report.json`。
 6. **声学起音锁定、15 ms 等功率微交叉淡化与关键帧硬件加速渲染 (`acoustic.py` / `render.py`)**：
    - 将剪辑入点锁定在声带振动前 80 ms；成片渲染采用每片段前置 `-ss` / `-to` 关键帧快速定位（跳过废片解码）、Apple Silicon `VideoToolbox` 硬件编解码（`-hwaccel videotoolbox` + `h264_videotoolbox`，支持 `libx264` 自动降级）、1 秒 GOP（`-g 30`）与 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 与 `afade=t=out:d=0.015:curve=qsin`）。
 7. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出**：

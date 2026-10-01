@@ -11,26 +11,26 @@
 
 ## 專案總覽 (Overview)
 
-**Video Trimmer** 是專為單機位口播、教學影片與演講錄影設計的 AI 自動粗剪與去蕪存菁引擎。系統結合 **Google Vertex AI Gemini 3.8 Flash** 原生多模態影片理解、**Whisper 毫秒級逐字聲學時間戳**（Apple Silicon Metal `mlx-whisper` 加速）、**四層統一剪輯架構（4-Layer Unified Architecture）** 以及 **聲學起音鎖定（Acoustic Onset Snapping）**。每次執行會自動剔除 NG 重錄、吃螺絲與無效停頓，同時保護連貫長句不被切碎，並匯出多格式專業剪輯時間軸（`.xml`, `.fcpxml`, `.edl`, `.csv`）與完成粗剪的 MP4 影片。
+**Video Trimmer** 是專為單機位口播、教學影片與演講錄影設計的 AI 自動粗剪與去蕪存菁引擎。系統結合 **Google Vertex AI Gemini 3.8 Flash** 原生多模態影片理解、**Whisper 毫秒級逐字聲學時間戳**（Apple Silicon Metal `mlx-whisper` 加速）、**五層統一剪輯架構（5-Layer Unified Architecture）** 以及 **聲學起音鎖定（Acoustic Onset Snapping）**。每次執行會自動剔除 NG 重錄、吃螺絲與無效停頓，同時保護連貫長句不被切碎，並匯出多格式專業剪輯時間軸（`.xml`, `.fcpxml`, `.edl`, `.csv`）、8 維度品質審計報告（`.md`, `.json`）與完成粗剪的 MP4 影片。
 
 ---
 
-## 四層統一剪輯架構與核心技術特點
+## 五層統一剪輯架構與核心技術特點
 
 1. **第一層：純聲學與標點子句切分 (`transcribe.py`)**：
    - 透過 Whisper 提取逐字時間戳，僅依據物理邊界切分 `Sentence ID`：換氣停頓（`gap >= 0.20s`）、吃螺絲拉長音起音（`word_dur >= 1.20s` 且單字元 `>= 0.45s`）、句尾標點與說話者輪替，同時保留微停頓（`gap < 0.25s`）下的連詞黏合（`CONJUNCTIONS`）。
    - **零 Python 語意猜測原則**：絕不在 Python 端使用字串相似度猜測 NG 重講，語意判斷 100% 交由 LLM 處理。
-2. **第二層：雙模式 LLM 語意擇優 (`gemini-3.8-flash`)**：
-   - **Mode A：有講稿單調錨定模式（傳入 `--script`）**：自動將講稿切分為 `[Script Block 01] .. [Script Block NN]`，嚴格依序單調對齊，每個講稿段落最多僅保留最後一次完整成功的 Take，徹底杜絕講稿句子重複出現。
+2. **第二層：雙模式 LLM 語意擇優與局部微視窗精準重掃 (`gemini_client.py` / `edl_auditor.py`)**：
+   - **Mode A：有講稿單調錨定模式（傳入 `--script`）**：採用單一真相來源（SSOT）講稿解析器（`extract_script_blocks`），自動過濾 YAML Frontmatter、鏡位指示與非口播屬性欄位（如 `標題：`、`主題：`、`大綱：`、`內文：`、`Title:`、`Subject:`、`Outline:`），將實際口播台詞切分為 `[Script Block 01] .. [Script Block NN]`，確保 Gemini 提示詞與審計器編號 100% 一致，並針對每個講稿段落最多保留最後一次完整成功的 Take（`Last-Take-Wins`）。
    - **Mode B：無講稿意圖視窗仲裁模式（未傳 `--script`）**：以局部語意視窗識別「未完成殘句重講（Abandoned Fragment）」並予以剔除，同時保護「刻意修辭排比強調（如：請訂閱、請訂閱、請訂閱）」不被誤刪。
-   - **局部小視窗精準重掃（Surgical Micro-Window Repair，`edl_auditor.py`）**：於進入 FFmpeg 渲染前，自動檢查初版 EDL 是否存在遺漏的講稿區塊（Mode A）、未綁定 `Sentence ID` 的片段或相鄰疑似重講句；若發現異常，僅針對該 `15s–90s` 局部視訊區間透過 Vertex AI `VideoMetadata(start_offset=..., end_offset=...)` 發起單次重掃修補，完全避開全片 Agentic 的 Timeout 風險。
+   - **局部小視窗精準重掃與子序列覆蓋率評估（`edl_auditor.py`）**：以完整講稿段落長度 `len(block_norm)` 為唯一分母計算分段覆蓋率（`_script_block_coverage_score`），容許 Whisper 同音字微幅差異並排除短 NG 殘句誤判；若偵測到遺漏段落、未錨定片段或相鄰疑似重講，將候選句依時間距離聚類後，僅針對該 `15s–90s` 局部視訊區間透過 `VideoMetadata(start_offset=..., end_offset=...)` 發起單次重掃，並執行 `deduplicate_and_sort_clips`（`Last-Take-Wins` 去重）。
 3. **第三層：子句展開與逐字稿邊界精修 (`resolve_clip_sub_units`)**：
    - 將多句跨度自動展開為獨立的 `Sentence ID` 子單元，自動略過時間區間內未被選中的 NG 句。
    - 當 LLM 在 `transcript` 欄位修剪了句首或句尾贅字時，透過 `_trim_matched_words_by_transcript` 自動將 `t_first` 與 `t_last` 對齊至實際保留字詞的 Whisper 邊界。
 4. **第四層：跨片段連貫小句無縫合一 (`coalesce_adjacent_sub_units`)**：
    - 當相鄰片段為連續 `Sentence ID`（中間未跳過任何 NG 句）且物理字間距 `< 0.40s` 時，自動合併為單一連續片段，消除長句內部的無謂跳接（Jump-Cut）與多餘微淡化。
 5. **第五層：物理時間軸確定性自癒與 8 維度品質審計 (`edl_auditor.py`)**：
-   - 自動消解相鄰邊界微重疊、強制保底 `source_out >= t_last`（保護字尾塞音）、自動縫合 `< 0.45s` 閃幀微碎切，並同步輸出 `<base>_<tag>_edl_report.md` 與含頂層 `agent_verdict` 品質閘門的 `<base>_<tag>_edl_report.json`。
+   - 強制依時間軸單調遞增排序（`source_in < source_out` 且 `c[i].source_out <= c[i+1].source_in`）、自動剔除被包裹的冗餘子片段、消解相鄰邊界微重疊、強制保底 `source_out >= t_last`（保護字尾塞音）、自動縫合 `< 0.45s` 閃幀微碎切，並同步輸出 `<base>_<tag>_edl_report.md` 與含頂層 `agent_verdict` 品質閘門的 `<base>_<tag>_edl_report.json`。
 6. **聲學起音鎖定與字尾塞音保護 (`acoustic.py`)**：
    - 將剪輯入點鎖定於聲帶發聲前 80 ms，並依據講者語速（CPS）動態計算緩衝邊界，強制 `true_speech_end >= t_last` 以保護字尾無聲除阻音與鼻音。
 7. **15 ms 等功率音訊微淡化與關鍵幀硬體加速渲染 (`render.py`)**：
@@ -64,7 +64,7 @@ video-trimmer/
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
-└── tests/                                   # 離線單元測試套件（91 項測試）
+└── tests/                                   # 離線單元測試套件（95 項測試）
 ```
 
 ---

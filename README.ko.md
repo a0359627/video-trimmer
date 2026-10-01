@@ -11,24 +11,24 @@
 
 ## 개요 (Overview)
 
-**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 3.8 Flash** 멀티모달 비디오 추론, **Whisper 단어 단위 음향 타임스탬프**(`mlx-whisper`), **4계층 통합 아키텍처(4-Layer Unified Architecture)** 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 말더듬, 무음 구간을 제거하면서 연속적인 문장 흐름을 유지하고 NLE 타임라인(`.xml`, `.fcpxml`, `.edl`, `.csv`)과 렌더링된 MP4 비디오를 생성합니다.
+**Video Trimmer**는 토킹헤드 비디오, 튜토리얼 및 발표 녹화물을 위한 AI 자동 러프컷 및 트리밍 엔진입니다. **Google Vertex AI Gemini 3.8 Flash** 멀티모달 비디오 추론, **Whisper 단어 단위 음향 타임스탬프**(`mlx-whisper`), **5계층 통합 아키텍처(5-Layer Unified Architecture)** 및 **음향 온셋 스내핑(Acoustic Onset Snapping)**을 결합하여 NG 테이크, 말더듬, 무음 구간을 제거하면서 연속적인 문장 흐름을 유지하고 NLE 타임라인(`.xml`, `.fcpxml`, `.edl`, `.csv`), 8차원 품질 감사 보고서(`.md`, `.json`) 및 렌더링된 MP4 비디오를 생성합니다.
 
 ---
 
-## 4계층 통합 아키텍처 및 핵심 기능
+## 5계층 통합 아키텍처 및 핵심 기능
 
 1. **계층 1: 순수 음향 및 구두점 기반 절 분할 (`transcribe.py`)**:
    - 호흡 휴지(`gap >= 0.20s`), 발화 지연 장음(`word_dur >= 1.20s`), 문장 부호 종결, 화자 교체의 물리적 경계만으로 `Sentence ID`를 분할하며, 미세 휴지(`gap < 0.25s`) 구간의 접속사 결합(`CONJUNCTIONS`)을 보존합니다. Python 문자열 유사도를 통한 의미 추측을 완전히 배제합니다.
-2. **계층 2: 듀얼 모드 LLM 테이크 중재 (`gemini-3.8-flash`)**:
-   - **Mode A: 대본 기반 단조 정렬 (`--script` 지정 시)**: 대본을 `[Script Block 01] .. [Script Block NN]`으로 구성하고 단조 순서로 각 블록당 최대 1개의 최종 성공 테이크만 선택합니다.
+2. **계층 2: 듀얼 모드 LLM 테이크 중재 및 국소 마이크로 윈도우 재스캔 (`gemini_client.py` / `edl_auditor.py`)**:
+   - **Mode A: 대본 기반 단조 정렬 (`--script` 지정 시)**: 단일 진실 공급원(SSOT) 파서(`extract_script_blocks`)를 통해 YAML 프론트매터, 무대 지시문 및 비발화 메타데이터 헤더(`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：` 등)를 제외하고 `[Script Block 01] .. [Script Block NN]`으로 구성하여 프롬프트와 감사기 간 번호를 100% 일치시키며 블록당 최대 1개의 최종 성공 테이크만 유지합니다(`Last-Take-Wins`).
    - **Mode B: 무대본 의도 윈도우 중재 (`--script` 생략 시)**: 중단된 미완성 조각(Abandoned Fragment)은 제거하고 의도적인 수사적 반복 강조(3회 반복 강조 등)는 보존합니다.
-   - **국소 마이크로 윈도우 재스캔 (Surgical Micro-Window Repair, `edl_auditor.py`)**: FFmpeg 렌더링 전에 누락된 대본 블록(Mode A), `Sentence ID` 미연결 클립 또는 인접한 리테이크 후보를 감지하여 해당 `15s–90s` 구간만 `VideoMetadata`로 재스캔함으로써 타임아웃을 방지합니다.
+   - **국소 마이크로 윈도우 재스캔 및 부분열 커버리지 평가 (`edl_auditor.py`)**: 대본 블록 길이 `len(block_norm)`를 유일한 분모로 커버리지를 계산(`_script_block_coverage_score`)하여 동음이의어 오차를 허용하면서 짧은 NG 조각 오탐을 차단합니다. 미선택 후보 문장을 시간 기반으로 클러스터링하여 해당 `15s–90s` 구간만 `VideoMetadata`로 재스캔한 뒤 `deduplicate_and_sort_clips`로 `Last-Take-Wins` 중복 제거를 수행합니다.
 3. **계층 3: 서브 유닛 확장 및 단어 경계 트리밍 (`resolve_clip_sub_units`)**:
    - 다중 문장 범위를 개별 `Sentence ID`로 확장하고 `transcript`에 맞춰 시작/끝 Whisper 단어 경계(`_trim_matched_words_by_transcript`)를 정밀하게 정렬합니다.
 4. **계층 4: 글로벌 클립 간 무결성 병합 (`coalesce_adjacent_sub_units`)**:
    - 인접한 클립이 연속된 `Sentence ID`이고 물리적 단어 간격이 `< 0.40s`인 경우 단일 연속 클립으로 병합하여 문장 내부의 불필요한 점프컷을 제거합니다.
 5. **계층 5: 결정론적 타임라인 자가 치유 및 8차원 품질 감사 (`edl_auditor.py`)**:
-   - 경계 미세 중첩 해소, `source_out >= t_last` 보장, `< 0.45s` 마이크로 클립 병합을 수행하고 `agent_verdict` 품질 게이트가 포함된 감사 보고서(`_edl_report.md` / `_edl_report.json`)를 생성합니다.
+   - 시간순 단조 증가(`source_in < source_out` 및 `c[i].source_out <= c[i+1].source_in`)를 보장하고 내포된 중복 클립 제거, 경계 미세 중첩 해소, `source_out >= t_last` 보장, `< 0.45s` 마이크로 클립 병합을 수행하며 `agent_verdict` 품질 게이트가 포함된 감사 보고서(`_edl_report.md` / `_edl_report.json`)를 생성합니다.
 6. **음향 온셋 스내핑, 15 ms 등전력 마이크로 크로스페이드 및 키프레임 하드웨어 가속 렌더링 (`acoustic.py` / `render.py`)**:
    - 성대 진동 80 ms 전에 컷 포인트를 배치하며, 클립별 `-ss` / `-to` 선행 키프레임 고속 탐색(불필요 구간 디코딩 생략), Apple Silicon `VideoToolbox` 하드웨어 가속(`-hwaccel videotoolbox` + `h264_videotoolbox`, `libx264` 자동 폴백 지원), 1초 GOP(`-g 30`) 및 15 ms 마이크로 페이드(`afade=t=in:d=0.015:curve=iqsin` 및 `afade=t=out:d=0.015:curve=qsin`)를 적용합니다.
 7. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원**:
