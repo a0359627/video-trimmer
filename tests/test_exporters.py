@@ -119,3 +119,38 @@ class TestGenerateEdlCsv(unittest.TestCase):
             generate_edl_csv(edl, csv_path)
             content = csv_path.read_text(encoding="utf-8-sig")
             assert '""你好""' in content
+
+
+class TestRenderCutVideo(unittest.TestCase):
+    def test_build_render_cmd_uses_per_clip_fast_seeking_and_gop_30(self):
+        from scripts.render import _build_render_cmd
+
+        edl = _sample_edl()
+        cmd = _build_render_cmd(
+            edl,
+            video_path="raw_footage.mp4",
+            out_mp4_path="out_trimmed.mp4",
+            crf=18,
+            encoder="h264_videotoolbox",
+            use_hwaccel=True,
+        )
+        cmd_str = " ".join(cmd)
+        self.assertIn("-hwaccel videotoolbox -ss 10.000 -to 15.000 -i raw_footage.mp4", cmd_str)
+        self.assertIn("-hwaccel videotoolbox -ss 20.000 -to 27.500 -i raw_footage.mp4", cmd_str)
+        self.assertIn("curve=iqsin", cmd_str)
+        self.assertIn("curve=oqsin", cmd_str)
+        self.assertIn("-c:v h264_videotoolbox -b:v 12M -g 30", cmd_str)
+        self.assertIn("-movflags +faststart", cmd_str)
+
+    def test_render_cut_video_falls_back_to_libx264_when_videotoolbox_fails(self):
+        from unittest.mock import MagicMock, patch
+        from scripts.render import render_cut_video
+
+        fail_proc = MagicMock(returncode=1, stderr="vt failed")
+        ok_proc = MagicMock(returncode=0, stderr="")
+        with patch("scripts.render.subprocess.run", side_effect=[fail_proc, fail_proc, ok_proc]) as mock_run:
+            render_cut_video(_sample_edl(), "raw_footage.mp4", "out_trimmed.mp4", crf=20)
+            self.assertEqual(mock_run.call_count, 3)
+            final_cmd = " ".join(mock_run.call_args_list[2][0][0])
+            self.assertIn("-c:v libx264 -preset fast -crf 20 -g 30", final_cmd)
+

@@ -74,8 +74,8 @@ video-trimmer/
 6. **Word Ground Truth Tail & Plosive Defense**:
    - Strictly enforces `true_speech_end >= t_last` with forward-only tracking down to ambient room noise.
    - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` in words like「台」) and soft trailing nasal vowels without clipping word endings.
-7. **15ms Audio Equal-Power Micro-Crossfade**:
-   - FFmpeg rendering injects 15ms `afade` micro-fades across all cut boundaries, completely eliminating digital pops, clicks, and background noise stepping.
+7. **15ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
+   - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15ms `afade` equal-power micro-fades (`iqsin`/`oqsin`) across all cut boundaries.
 8. **Production Script Injection (`--script`)**:
    - Ingests production shooting scripts (`.md` / `.txt`) to guide section-by-section matching and prevent skipping intended talking points.
 9. **Universal NLE Project Export**:

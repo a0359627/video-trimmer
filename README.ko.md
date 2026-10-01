@@ -26,8 +26,8 @@
    - 다중 문장 범위를 개별 `Sentence ID`로 확장하고 `transcript`에 맞춰 시작/끝 Whisper 단어 경계(`_trim_matched_words_by_transcript`)를 정밀하게 정렬합니다.
 4. **계층 4: 글로벌 클립 간 무결성 병합 (`coalesce_adjacent_sub_units`)**:
    - 인접한 클립이 연속된 `Sentence ID`이고 물리적 단어 간격이 `< 0.40s`인 경우 단일 연속 클립으로 병합하여 문장 내부의 불필요한 점프컷을 제거합니다.
-5. **음향 온셋 스내핑 및 15 ms 등전력 마이크로 크로스페이드**:
-   - 성대 진동 80 ms 전에 컷 포인트를 배치하고 모든 편집 경계에 15 ms 마이크로 페이드(`afade=t=in:d=0.015:curve=iqsin` 및 `afade=t=out:d=0.015:curve=oqsin`)를 적용하여 팝 노이즈를 방지합니다.
+5. **음향 온셋 스내핑, 15 ms 등전력 마이크로 크로스페이드 및 키프레임 하드웨어 가속 렌더링 (`acoustic.py` / `render.py`)**:
+   - 성대 진동 80 ms 전에 컷 포인트를 배치하며, 클립별 `-ss` / `-to` 선행 키프레임 고속 탐색(불필요 구간 디코딩 생략), Apple Silicon `VideoToolbox` 하드웨어 가속(`-hwaccel videotoolbox` + `h264_videotoolbox`, `libx264` 자동 폴백 지원), 1초 GOP(`-g 30`) 및 15 ms 마이크로 페이드(`afade=t=in:d=0.015:curve=iqsin` 및 `afade=t=out:d=0.015:curve=oqsin`)를 적용합니다.
 6. **Agent Plugins 1.0 표준 아키텍처 및 멀티 NLE 타임라인 지원**:
    - 핵심 스크립트와 프롬프트는 `skills/video-trimmer/scripts/` 및 `skills/video-trimmer/prompts/`(SSOT)에 위치하며 루트 심볼릭 링크 없는 순수 구조와 2계층 `AGENTS.md` / `rules/AGENTS.md`를 제공합니다. **FCP7 XML**, **FCPXML**, **CMX 3600 EDL** 및 **CSV**를 내보냅니다.
 
