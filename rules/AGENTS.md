@@ -15,7 +15,7 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
   - Show the exact error message and exit status to the user.
   - Give a clear, actionable solution to the user (for example, run `./setup.sh --project YOUR_PROJECT_ID`, run `gcloud auth application-default login`, or install FFmpeg).
   - Do NOT try to modify the script, probe different code paths, or rewrite logic.
-- Verify all required deliverable files (`.mp4`, `.fcpxml`, `.xml`, `.edl`, `.csv`, `_edl_report.md`) exist on disk and are non-empty (`> 0 bytes`) before declaring task completion.
+- Verify all required deliverable files (`_trimmed.mp4`, `_edl.fcpxml`, `_edl.xml`, `_edl.json`, `_edl.csv`, `_whisper_raw.json`) exist in the output directory (`<input_dir>/output/` by default) and are non-empty (`> 0 bytes`) before declaring task completion.
 
 ## 3. Strict Zero-Emoji Policy & Dynamic Language Mirroring
 - Do NOT use emojis or decorative icons in headings or tables in generated Markdown reports or EDL notes.

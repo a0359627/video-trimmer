@@ -114,10 +114,19 @@ def _append_usage_log(out_dir, video_path, model, usage, mode, duration):
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
+def _resolve_output_dir(output_dir_arg: str | None, default_parent: Path) -> Path:
+    """Resolve the output directory and isolate deliverables in <default_parent>/output by default."""
+    if output_dir_arg:
+        out_dir = Path(output_dir_arg).expanduser().resolve()
+    else:
+        out_dir = default_parent.resolve() / "output"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    return out_dir
+
+
 def _run(args):
     if is_gdrive_source(args.input):
-        out_dir = Path(args.output_dir).resolve() if args.output_dir else Path.cwd()
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = _resolve_output_dir(args.output_dir, Path.cwd())
         try:
             video_path = download_gdrive_file_with_cache(
                 args.input,
@@ -127,11 +136,10 @@ def _run(args):
         except Exception as e:
             raise InvalidInputError(f"從 Google Drive 讀取影片失敗: {e}") from e
     else:
-        video_path = Path(args.input).resolve()
+        video_path = Path(args.input).expanduser().resolve()
         if not video_path.exists():
             raise InvalidInputError(f"找不到影片檔案 {video_path}")
-        out_dir = Path(args.output_dir).resolve() if args.output_dir else video_path.parent
-        out_dir.mkdir(parents=True, exist_ok=True)
+        out_dir = _resolve_output_dir(args.output_dir, video_path.parent)
 
     _validate_input_extension(video_path)
     base_name = video_path.stem
@@ -140,6 +148,7 @@ def _run(args):
     tag = args.suffix if args.suffix else ("agentic" if args.agentic else "static")
 
     logger.info("==> 1. 檢測影片資訊: %s", video_path.name)
+    logger.info("    輸出目錄: %s", out_dir)
     total_dur, width, height, fps = probe_video(video_path)
     logger.info("    時長: %.1f 秒 (~%.1f 分鐘) | 解析度: %dx%d | 幀率: %.3f fps",
                 total_dur, total_dur / 60, width, height, fps)
@@ -401,7 +410,7 @@ def main():
 
     parser = argparse.ArgumentParser(description="video-trimmer: AI-Powered Smart Video Trimmer (Whisper Ground-Truth + Vertex AI Gemini)")
     parser.add_argument("--input", "-i", required=True, help="輸入影片檔案路徑 (MP4/MOV) 或 Google Drive 分享連結 (https://drive.google.com/... / gdrive://...)")
-    parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為影片所在目錄)")
+    parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為 <影片所在目錄>/output/，Google Drive 連結則為 ./output/)")
     parser.add_argument("--model", "-m", default=default_model, help=f"使用的 Gemini 模型名稱 (預設: {default_model})")
     parser.add_argument("--project", default=None, help="Google Cloud 專案 ID (預設讀取 GOOGLE_CLOUD_PROJECT/GCP_PROJECT 或 ADC)")
     parser.add_argument("--region", default=None, help="Vertex AI 區域/位置 (預設讀取 GOOGLE_CLOUD_LOCATION/GCP_REGION 或 'global')")

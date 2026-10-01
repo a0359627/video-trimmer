@@ -106,10 +106,10 @@ gcloud auth application-default login
 
 ### Step 2: Execute Primary Video Trimmer Pipeline
 
-Default execution uses fast Static Multimodal mode (`MEDIA_RESOLUTION_LOW`). Pass `--agentic` only when the user explicitly requests Agentic Video Understanding.
+Default execution uses fast Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) and automatically isolates all generated deliverables inside `<input_dir>/output/` (`./output/` for Google Drive links). Pass `--agentic` only when the user explicitly requests Agentic Video Understanding.
 
 ```bash
-# Standard automatic rough-cut (Static Multimodal by default, Cwd = <PLUGIN_ROOT>):
+# Standard automatic rough-cut (outputs isolated in <input_dir>/output/ by default, Cwd = <PLUGIN_ROOT>):
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4"
 
 # If production shooting script is provided (Mode A - Monotonic Script-Anchored Alignment):
@@ -118,14 +118,14 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 # Fast-paced explainer pacing:
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --pacing compact
 
-# Explicit output directory:
+# Explicit output directory override:
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md" -o "/path/to/output_dir"
 ```
 
 ### Step 3: Fast Local Iteration (Cached EDL Workflow)
 To adjust pacing, fine-tune margins, or re-render without re-incurring cloud API inference:
 ```bash
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --cached-json "/path/to/raw_footage_static_edl.json" --suffix "fine_tuned"
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --cached-json "/path/to/output/raw_footage_static_edl.json" --suffix "fine_tuned"
 ```
 
 ---
@@ -134,8 +134,8 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 
 | Option | Flag | Default | Description |
 | :--- | :---: | :--- | :--- |
-| `--input` | `-i` | *(Required)* | Path to input raw video file (`.mp4`, `.mov`). |
-| `--output-dir` | `-o` | Same as video | Directory to save all generated output files. |
+| `--input` | `-i` | *(Required)* | Path to input raw video file (`.mp4`, `.mov`) or Google Drive link. |
+| `--output-dir` | `-o` | `<input_dir>/output/` | Directory to save all generated output files (`./output/` for Google Drive links). |
 | `--model` | `-m` | `gemini-3.8-flash` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-3.8-flash`). |
 | `--project` | | `None` | Google Cloud Project ID (defaults to `$GOOGLE_CLOUD_PROJECT` or ADC). |
 | `--region` | | `None` | Vertex AI location/region (defaults to `$GOOGLE_CLOUD_LOCATION` or `global`). |
@@ -154,13 +154,13 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 
 ## Output Deliverables
 
-For an input file `raw_footage.mp4`, the skill generates:
-1. `raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 15ms micro-fades.
-2. `raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve**.
-3. `raw_footage_<suffix>_edl.fcpxml`: FCPXML timeline for **Final Cut Pro X**.
-4. `raw_footage_<suffix>_edl.json`: Structured decision metadata with per-clip CPS and margins.
-5. `raw_footage_<suffix>_edl.csv`: Spreadsheet table with visual/audio validation notes.
-6. `raw_footage_whisper_sentences.json`: Word-level semantic sentence transcript cache.
+For an input file `raw_footage.mp4`, the skill isolates all generated files inside `<input_dir>/output/` (or the directory specified via `-o`):
+1. `output/raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 15ms micro-fades.
+2. `output/raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve**.
+3. `output/raw_footage_<suffix>_edl.fcpxml`: FCPXML timeline for **Final Cut Pro X**.
+4. `output/raw_footage_<suffix>_edl.json`: Structured decision metadata with per-clip CPS and margins.
+5. `output/raw_footage_<suffix>_edl.csv`: Spreadsheet table with visual/audio validation notes.
+6. `output/raw_footage_whisper_raw.json`: Word-level semantic sentence transcript cache.
 
 ---
 

@@ -56,8 +56,10 @@ chmod +x setup.sh
 
 ## 명령줄 사용법 (CLI Usage)
 
+기본적으로 생성된 모든 결과물은 원본 비디오 폴더 아래의 `output/` 하위 디렉터리(Google Drive 링크의 경우 `./output/`)에 자동으로 격리 저장되며, `-o` 옵션으로 출력 경로를 직접 지정할 수도 있습니다:
+
 ```bash
-# Mode B: 무대본 자동 러프컷 (기본값은 빠른 Static Multimodal 모드)
+# Mode B: 무대본 자동 러프컷 (기본값은 빠른 Static Multimodal 모드, 결과물은 <input_dir>/output/에 자동 저장)
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
 # Mode A: 촬영 대본 기반 단조 정렬
@@ -66,8 +68,8 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --scr
 # Agentic 비디오 이해 모드 명시적 활성화
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
-# Google Drive 공유 링크에서 직접 러프컷 실행
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" -o output/
+# Google Drive 공유 링크에서 직접 러프컷 실행 (기본 출력 경로: ./output/)
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing"
 ```
 
 ---

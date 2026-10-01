@@ -129,7 +129,7 @@ chmod +x setup.sh
 ## Command-Line Usage
 
 ```bash
-# Mode B: Unscripted rough-cut (Static Multimodal by default, fast & timeout-free)
+# Mode B: Unscripted rough-cut (outputs isolated in <input_dir>/output/ by default)
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
 # Mode A: Script-Anchored rough-cut (Monotonic [Script Block NN] alignment)
@@ -142,7 +142,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "sample_take.mp4" --pac
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
 # Re-render locally from a cached EDL JSON without re-running Gemini inference
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "raw_footage_static_edl.json"
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "output/raw_footage_static_edl.json"
 ```
 
 ---
@@ -152,7 +152,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cac
 | Option | Short Flag | Default | Description |
 | :--- | :---: | :---: | :--- |
 | `--input` | `-i` | *(Required)* | Input video file path (`.mp4`, `.mov`), Google Drive URL, or `gs://` URI |
-| `--output-dir` | `-o` | Same as input | Output directory for generated timelines and rendered video |
+| `--output-dir` | `-o` | `<input_dir>/output/` | Output directory for generated timelines and rendered video (`./output/` for Google Drive URLs) |
 | `--model` | `-m` | `gemini-3.8-flash` | Vertex AI model identifier (`MODEL_NAME`) |
 | `--project` | | `None` | Google Cloud Project ID (`GOOGLE_CLOUD_PROJECT`) |
 | `--region` | | `global` | Vertex AI location (`GOOGLE_CLOUD_LOCATION`) |
@@ -171,14 +171,14 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cac
 
 ## Generated Deliverables
 
-For an input video `raw_footage.mp4`, the tool generates:
+For an input video `raw_footage.mp4`, the tool automatically creates an `output/` subdirectory next to the source video (or uses the folder passed to `-o`) and generates:
 
-1. **`raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 15 ms equal-power audio crossfades.
-2. **`raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve**.
-3. **`raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML timeline for **Final Cut Pro**.
-4. **`raw_footage_<tag>_edl.json`**: Structured cut list with selected sentences, CPS values, and timestamps.
-5. **`raw_footage_<tag>_edl.csv`**: Spreadsheet cut table with editorial notes.
-6. **`raw_footage_whisper_sentences.json`**: Cached Whisper word-level transcript.
+1. **`output/raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 15 ms equal-power audio crossfades.
+2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve**.
+3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML timeline for **Final Cut Pro**.
+4. **`output/raw_footage_<tag>_edl.json`**: Structured cut list with selected sentences, CPS values, and timestamps.
+5. **`output/raw_footage_<tag>_edl.csv`**: Spreadsheet cut table with editorial notes.
+6. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
 
 ---
 

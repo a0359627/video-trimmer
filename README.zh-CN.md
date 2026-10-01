@@ -56,8 +56,10 @@ chmod +x setup.sh
 
 ## 命令行使用说明 (CLI Usage)
 
+默认情况下，所有生成文件均会自动隔离保存至输入视频所在目录下的 `output/` 子目录（Google Drive 链接则为 `./output/`），也可通过 `-o` 自定义输出目录：
+
 ```bash
-# Mode B：无讲稿自动粗剪（默认采用 Static Multimodal 快速模式）
+# Mode B：无讲稿自动粗剪（默认采用 Static Multimodal 快速模式，输出自动保存在 <input_dir>/output/）
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
 # Mode A：配合拍摄脚本单调锚定对齐
@@ -66,8 +68,8 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --scr
 # 明确启用 Agentic 视频理解模式
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
-# 直接从 Google Drive 分享链接进行粗剪
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" -o output/
+# 直接从 Google Drive 分享链接进行粗剪（默认输出至 ./output/）
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing"
 ```
 
 ---

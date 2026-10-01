@@ -56,8 +56,10 @@ chmod +x setup.sh
 
 ## コマンドライン使用法 (CLI Usage)
 
+デフォルトでは、すべての生成ファイルは入力動画の親ディレクトリ配下の `output/` サブディレクトリ（Google Drive リンクの場合は `./output/`）に自動的に分離して保存されます（`-o` で出力先を指定することも可能です）：
+
 ```bash
-# Mode B：台本なし自動ラフカット（デフォルトは高速な Static Multimodal モード）
+# Mode B：台本なし自動ラフカット（デフォルトは高速な Static Multimodal モード、出力は <input_dir>/output/ に保存）
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
 # Mode A：台本（スクリプト）を用いた単調アンカーアライメント
@@ -66,8 +68,8 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --scr
 # Agentic 動画理解モードを明示的に有効化
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
-# Google Drive 共有リンクからの直接ラフカット
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing" -o output/
+# Google Drive 共有リンクからの直接ラフカット（デフォルト出力先は ./output/）
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "https://drive.google.com/file/d/FILE_ID/view?usp=sharing"
 ```
 
 ---

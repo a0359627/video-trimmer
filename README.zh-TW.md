@@ -104,8 +104,10 @@ chmod +x setup.sh
 
 ## 命令列使用說明 (CLI Usage)
 
+預設情況下，所有產出檔案（`_trimmed.mp4`、`.xml`、`.fcpxml`、`.json`、`.csv` 與 `_whisper_raw.json`）皆會自動隔離儲存於原始影片目錄下的 `output/` 子目錄（Google Drive 連結則為 `./output/`），亦可使用 `-o` 指定自訂輸出目錄：
+
 ```bash
-# Mode B：無講稿自動粗剪（預設採用 Static Multimodal 快速模式）
+# Mode B：無講稿自動粗剪（預設採用 Static Multimodal 快速模式，產出物自動存於 <input_dir>/output/）
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
 
 # Mode A：搭配拍攝腳本單調錨定對齊（推薦有講稿拍攝使用）
@@ -118,7 +120,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "sample_take.mp4" --pac
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
 
 # 使用已快取的 EDL JSON 本地快速重算與渲染
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "raw_footage_static_edl.json"
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "output/raw_footage_static_edl.json"
 ```
 
 ---

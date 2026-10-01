@@ -155,3 +155,57 @@ class TestRenderCutVideo(unittest.TestCase):
             final_cmd = " ".join(mock_run.call_args_list[2][0][0])
             self.assertIn("-c:v libx264 -preset fast -crf 20 -g 30", final_cmd)
 
+    def test_real_ffmpeg_filtergraph_execution(self):
+        import shutil
+        import subprocess
+        from scripts.render import render_cut_video
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            src_mp4 = tmp_path / "synthetic_input.mp4"
+            out_mp4 = tmp_path / "synthetic_trimmed.mp4"
+            subprocess.run(
+                [
+                    "ffmpeg", "-y",
+                    "-f", "lavfi", "-i", "color=c=black:s=320x240:r=30:d=1.5",
+                    "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=1.5",
+                    "-c:v", "libx264", "-preset", "ultrafast", "-g", "15",
+                    "-c:a", "aac",
+                    str(src_mp4),
+                ],
+                check=True,
+                capture_output=True,
+            )
+            edl = [
+                {"clip_id": 1, "topic": "A", "source_in": 0.1, "source_out": 0.5, "duration": 0.4},
+                {"clip_id": 2, "topic": "B", "source_in": 0.8, "source_out": 1.3, "duration": 0.5},
+            ]
+            render_cut_video(edl, src_mp4, out_mp4, crf=24)
+            self.assertTrue(out_mp4.exists())
+            self.assertGreater(out_mp4.stat().st_size, 0)
+
+
+class TestResolveOutputDir(unittest.TestCase):
+    def test_defaults_to_output_subdir_under_parent(self):
+        from scripts.video_trimmer import _resolve_output_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_dir = Path(tmp)
+            out_dir = _resolve_output_dir(None, parent_dir)
+            self.assertEqual(out_dir, parent_dir.resolve() / "output")
+            self.assertTrue(out_dir.is_dir())
+
+    def test_explicit_output_dir_overrides_default(self):
+        from scripts.video_trimmer import _resolve_output_dir
+
+        with tempfile.TemporaryDirectory() as tmp:
+            parent_dir = Path(tmp)
+            custom_dir = parent_dir / "custom_deliverables"
+            out_dir = _resolve_output_dir(str(custom_dir), parent_dir)
+            self.assertEqual(out_dir, custom_dir.resolve())
+            self.assertTrue(out_dir.is_dir())
+
+
