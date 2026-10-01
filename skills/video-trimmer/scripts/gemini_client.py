@@ -218,6 +218,41 @@ def build_prompt(prompt_file_candidates, script_path=None, whisper_units=None):
     return prompt
 
 
+def build_micro_window_repair_prompt(
+    prompt_file_candidates,
+    whisper_units: list[dict],
+    anomaly: dict,
+    script_path=None,
+) -> str:
+    """
+    Build a surgical micro-window remediation prompt for a 15-to-90s video slice.
+
+    ASD-STE100:
+    Attach the pre-render anomaly reason to guide Gemini take arbitration inside the local window.
+    """
+    base_prompt = build_prompt(
+        prompt_file_candidates=prompt_file_candidates,
+        script_path=script_path,
+        whisper_units=whisper_units,
+    )
+    blk_info = ""
+    if anomaly.get("script_block"):
+        blk = anomaly["script_block"]
+        blk_info = f"- Target Script Block: {blk['label']} {blk['raw_text']}\n"
+
+    directive = (
+        "\n\n---\n"
+        "## Surgical Micro-Window Remediation Directive\n"
+        f"- Anomaly Type: {anomaly.get('type', 'UNKNOWN')}\n"
+        f"- Audit Finding: {anomaly.get('reason', '')}\n"
+        f"{blk_info}"
+        "- Inspect only the candidate `Sentence ID`s listed above within this short video window.\n"
+        "- Populate `sentence_ids`, `start_sentence_id`, and `end_sentence_id` for the final complete winning take(s).\n"
+        "- Exclude all earlier false starts, stumbles, or duplicate retakes.\n"
+    )
+    return base_prompt + directive
+
+
 def _extract_text_from_response(response) -> str:
     """
     Extract visible non-thought text content from a Gemini response object.

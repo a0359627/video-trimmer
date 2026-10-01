@@ -9,13 +9,16 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Resolve `<PLUGIN_ROOT>` as two directory levels above `skills/video-trimmer/SKILL.md` (`../../`, e.g., `/Users/sylph/.gemini/config/plugins/video-trimmer`).
 - Set `Cwd` to `<PLUGIN_ROOT>` and run `python3 skills/video-trimmer/scripts/video_trimmer.py` directly with `run_command` after verifying the environment (`Step 1`). Do NOT search for global `video-trimmer` CLI aliases with `find_by_name` or `list_dir`.
 
-## 2. Fail-Fast on Errors & Exit Gate Verification (Do Not Debug or Rewrite Code)
-- If a script fails (exit code is not 0) or an external error occurs (such as 401 Unauthorized, 403 Forbidden, Quota Exceeded, missing Application Default Credentials, or missing FFmpeg):
+## 2. Fail-Fast on Cloud Errors, Quality Gate (`agent_verdict`), & One-Shot Self-Healing Protocol
+- If a script fails with exit code `1` (such as 401 Unauthorized, 403 Forbidden, Quota Exceeded, missing Application Default Credentials, or missing FFmpeg):
   - Stop immediately.
   - Show the exact error message and exit status to the user.
   - Give a clear, actionable solution to the user (for example, run `./setup.sh --project YOUR_PROJECT_ID`, run `gcloud auth application-default login`, or install FFmpeg).
   - Do NOT try to modify the script, probe different code paths, or rewrite logic.
-- Verify all required deliverable files (`_trimmed.mp4`, `_edl.fcpxml`, `_edl.xml`, `_edl.json`, `_edl.csv`, `_whisper_raw.json`) exist in the output directory (`<input_dir>/output/` by default) and are non-empty (`> 0 bytes`) before declaring task completion.
+- Verify all required deliverable files (`_trimmed.mp4`, `_edl.fcpxml`, `_edl.xml`, `_edl.json`, `_edl.csv`, `_edl_report.md`, `_edl_report.json`, `_whisper_raw.json`) exist in the output directory (`<input_dir>/output/` by default) and are non-empty (`> 0 bytes`) before declaring task completion.
+- Inspect the top-level `agent_verdict` object in `<BASENAME>_<TAG>_edl_report.json`:
+  - If `agent_verdict.pass_quality_gate` is `true` (`suggested_action == "DELIVER"`), deliver the final trimmed MP4, NLE timelines, and audit summary to the user.
+  - **One-Shot Self-Healing Protocol (Max 1 Retry)**: If `agent_verdict.pass_quality_gate` is `false` (`suggested_action == "ONE_SHOT_REMEDIATE"`, or exit code `2` when `--strict` is enabled), you may execute **at most ONE** automated remediation re-run (`remediation_cmd`). If the second run still reports `pass_quality_gate: false`, stop immediately, report the `[Degraded]` status and `fatal_violations` to the user, and do NOT enter an infinite retry loop.
 
 ## 3. Strict Zero-Emoji Policy & Dynamic Language Mirroring
 - Do NOT use emojis or decorative icons in headings or tables in generated Markdown reports or EDL notes.

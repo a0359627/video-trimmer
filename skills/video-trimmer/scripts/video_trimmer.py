@@ -42,10 +42,17 @@ if __package__ in (None, ""):
 
 from .acoustic import refine_speech_bounds_locked
 from .constants import ALLOWED_INPUT_EXTENSIONS
+from .edl_auditor import (
+    audit_edl_quality,
+    generate_edl_audit_markdown,
+    repair_edl_micro_windows,
+    sanitize_refined_edl,
+)
 from .exceptions import InvalidInputError, VideoTrimmerError
 from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
 from .gcs_utils import delete_gcs_blob, is_gdrive_source, download_gdrive_file_with_cache
 from .gemini_client import (
+    build_micro_window_repair_prompt,
     build_prompt,
     get_gemini_client,
     load_env_file,
@@ -170,6 +177,10 @@ def _run(args):
 
     # 第二階段：Gemini 宏觀多模態視訊理解與選鏡決策
     inference_metrics = {}
+    micro_window_repairs = []
+    script_path = Path(args.script).resolve() if args.script else None
+    script_text = script_path.read_text(encoding="utf-8") if (script_path is not None and script_path.exists()) else None
+
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
         if not cached_file.exists():
@@ -189,12 +200,10 @@ def _run(args):
             Path(__file__).parent / "video-trimmer" / "prompts" / "video_cut_prompt.md",
             *[p / "prompts" / "video_cut_prompt.md" for p in _resolved_file.parents[:5]],
         ]
-        script_path = Path(args.script).resolve() if args.script else None
 
         # Step 3a: 若提供講稿且影片為長素材，先依據講稿語意句子定位有效視訊視窗
         win_start, win_end, active_units = 0.0, total_dur, whisper_units
-        if script_path is not None and script_path.exists() and total_dur > 600.0 and whisper_units:
-            script_text = script_path.read_text(encoding="utf-8")
+        if script_text is not None and total_dur > 600.0 and whisper_units:
             win_start, win_end, active_units = calculate_active_script_window(
                 whisper_units=whisper_units,
                 script_text=script_text,
@@ -232,7 +241,7 @@ def _run(args):
         logger.info("==> 3. 準備視訊至 Cloud Storage 暫存...")
         gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(video_path, resolved_bucket)
 
-        mode_str = "🤖 Agentic Video Understanding (動態影格探索模式)" if args.agentic else "📺 Static Multimodal (靜態抽幀)"
+        mode_str = "Agentic Video Understanding" if args.agentic else "Static Multimodal"
         logger.info("==> 4. 調用 %s [模式: %s] 結合 Whisper 劇本進行文字剪輯與選鏡決策...", args.model, mode_str)
 
         usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
@@ -278,20 +287,56 @@ def _run(args):
                     usage[k] += c_usage.get(k, 0)
 
                 chunk_edl_results.append(_parse_gemini_json_text(c_raw_json))
+
+            if len(chunk_edl_results) == 1:
+                model_edl = chunk_edl_results[0]
+            else:
+                model_edl = merge_chunked_edl(
+                    chunk_edl_results,
+                    project_title=f"{base_name} AI Video Trimmer ({tag})",
+                )
+
+            # Step 4b: Pre-Render Semantic Audit & Surgical Micro-Window Repair (15s-90s windows)
+            if whisper_units:
+                def _run_window_repair(win_units, win_start, win_end, start_offset, end_offset, anomaly):
+                    nonlocal duration
+                    w_prompt = build_micro_window_repair_prompt(
+                        prompt_file_candidates=prompt_candidates,
+                        whisper_units=win_units,
+                        anomaly=anomaly,
+                        script_path=script_path,
+                    )
+                    w_raw_json, w_usage, w_dur = run_gemini_inference(
+                        client,
+                        types,
+                        args.model,
+                        gcs_uri,
+                        mime_type,
+                        w_prompt,
+                        False,
+                        num_sentences=max(1, len(win_units)),
+                        video_duration=max(10.0, win_end - win_start),
+                        start_offset=start_offset,
+                        end_offset=end_offset,
+                    )
+                    duration += w_dur
+                    for k in usage:
+                        usage[k] += w_usage.get(k, 0)
+                    return _parse_gemini_json_text(w_raw_json)
+
+                model_edl, micro_window_repairs = repair_edl_micro_windows(
+                    model_edl=model_edl,
+                    whisper_units=whisper_units,
+                    total_dur=total_dur,
+                    run_window_inference_fn=_run_window_repair,
+                    script_text=script_text,
+                )
         finally:
             if is_ephemeral and not args.keep_gcs_upload:
                 delete_gcs_blob(gcs_uri)
 
-        if len(chunk_edl_results) == 1:
-            model_edl = chunk_edl_results[0]
-        else:
-            model_edl = merge_chunked_edl(
-                chunk_edl_results,
-                project_title=f"{base_name} AI Video Trimmer ({tag})",
-            )
-
         logger.info("    模型推論完成 (耗時 %.1f 秒)！", duration)
-        logger.info("    📊 Token 統計: 輸入=%s | 輸出=%s | 思維=%s | 工具探索=%s | 總計=%s",
+        logger.info("    Token 統計: 輸入=%s | 輸出=%s | 思維=%s | 工具探索=%s | 總計=%s",
                     f"{usage['prompt_tokens']:,}", f"{usage['candidates_tokens']:,}",
                     f"{usage['thoughts_tokens']:,}", f"{usage['tool_use_tokens']:,}", f"{usage['total_tokens']:,}")
 
@@ -303,7 +348,8 @@ def _run(args):
             "candidates_tokens": usage["candidates_tokens"],
             "thoughts_tokens": usage["thoughts_tokens"],
             "tool_use_tokens": usage["tool_use_tokens"],
-            "total_tokens": usage["total_tokens"]
+            "total_tokens": usage["total_tokens"],
+            "micro_window_repairs": len(micro_window_repairs),
         }
         _append_usage_log(out_dir, video_path, args.model, usage, mode, duration)
 
@@ -354,6 +400,9 @@ def _run(args):
         refined_edl.append({
             "clip_id": seq_id,
             "topic": su["topic"],
+            "sentence_ids": su.get("sentence_ids", []),
+            "t_first": round(t_first, 2),
+            "t_last": round(t_last, 2),
             "source_in": tight_in,
             "source_out": tight_out,
             "duration": dur,
@@ -369,22 +418,49 @@ def _run(args):
                     seq_id, tight_in, tight_out, dur, t_first, t_last, su["topic"])
 
     temp_wav.unlink(missing_ok=True)
+
+    # 5d. 物理時間軸確定性自癒 (Overlap De-confliction, Plosive Tail Floor, Micro-Clip Coalescing)
+    refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
     avg_cps = round(sum(c["cps"] for c in refined_edl) / max(1, len(refined_edl)), 2)
     logger.info("    初剪片段數: %d | 成片預計長度: %.1f 秒 (~%.2f 分鐘) | 全片平均語速: %.2f 字/秒",
                 len(refined_edl), total_out_dur, total_out_dur / 60, avg_cps)
+
+    # 5e. 執行 8 維度粗剪品質審計 (8-Dimension Rough-Cut Quality Audit & agent_verdict)
+    audit_report = audit_edl_quality(
+        refined_edl=refined_edl,
+        whisper_units=whisper_units,
+        total_dur=total_dur,
+        video_path=video_path,
+        script_text=script_text,
+        script_path=script_path,
+        sanitization_stats=sanitization_stats,
+        micro_window_repairs=micro_window_repairs,
+    )
+    report_json_path = out_dir / f"{base_name}_{tag}_edl_report.json"
+    report_md_path = out_dir / f"{base_name}_{tag}_edl_report.md"
+    report_json_path.write_text(json.dumps(audit_report, ensure_ascii=False, indent=2), encoding="utf-8")
+    generate_edl_audit_markdown(audit_report, report_md_path)
+    verdict = audit_report["agent_verdict"]
+    logger.info(
+        "    [品質審計] 等級: %s | 通過品質閘門: %s | 報告: %s",
+        verdict["overall_grade"],
+        verdict["pass_quality_gate"],
+        report_md_path.name,
+    )
 
     # 輸出資料
     json_path = out_dir / f"{base_name}_{tag}_edl.json"
     json_path.write_text(json.dumps({
         "project_title": f"{base_name} AI Video Trimmer ({tag})",
         "pacing_style": "text_based_whisper_grounded",
+        "agent_verdict": verdict,
         "inference_metrics": inference_metrics,
         "average_cps": avg_cps,
         "total_duration": total_out_dur,
         "final_edl": refined_edl
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("==> 6. 輸出結構化資料: %s", json_path.name)
+    logger.info("==> 6. 輸出結構化資料與審計報告: %s, %s", json_path.name, report_json_path.name)
 
     csv_path = out_dir / f"{base_name}_{tag}_edl.csv"
     generate_edl_csv(refined_edl, csv_path)
@@ -402,6 +478,10 @@ def _run(args):
     logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
     render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
     logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
+
+    if args.strict and not verdict["pass_quality_gate"]:
+        logger.error("==> [嚴格品質閘門未通過] %s", "; ".join(verdict["fatal_violations"]))
+        sys.exit(2)
 
 
 def main():
@@ -425,6 +505,7 @@ def main():
     parser.add_argument("--cached-json", default=None,
                         help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析")
     parser.add_argument("--skip-whisper", action="store_true", help="跳過本地 Whisper 轉錄，僅使用純能量檢測")
+    parser.add_argument("--strict", action="store_true", help="啟用嚴格品質閘門 (若 agent_verdict.pass_quality_gate 為 false 則於輸出報告後以 exit code 2 結束)")
     parser.add_argument("--verbose", action="store_true", help="輸出詳細除錯訊息 (DEBUG level)")
     args = parser.parse_args()
 
@@ -439,3 +520,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

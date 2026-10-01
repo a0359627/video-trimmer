@@ -24,17 +24,19 @@
 2. **Layer 2 — Dual-Mode LLM Take Arbitration (`gemini-3.8-flash`)**:
    - **Mode A: Monotonic Script-Anchored Alignment (`--script`)**: Formats the reference script into `[Script Block 01] .. [Script Block NN]` and selects at most one final complete take per script block in strict monotonic order.
    - **Mode B: Unscripted Intent-Window Arbitration (No `--script`)**: Groups consecutive clauses into semantic intent windows, prunes abandoned fragments and false starts, and preserves intentional rhetorical repetition (e.g., three-part emphasis).
-   - **Tail-to-Head Overlap Check**: Prevents duplicate opening clauses across adjacent output clips.
+   - **Surgical Micro-Window Repair (`edl_auditor.py`)**: Before video rendering, detects any missed script blocks (Mode A), unanchored clips, or adjacent retake candidates and re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, avoiding full-video gateway timeouts.
 3. **Layer 3 — Sub-Unit Expansion & Transcript Word-Boundary Trimming (`resolve_clip_sub_units`)**:
    - Expands multi-sentence spans into individual `Sentence ID` sub-units so dropped NG sentences inside a time window are excluded.
    - Aligns `t_first` and `t_last` to the exact Whisper word boundaries of `clip_data["transcript"]` (`_trim_matched_words_by_transcript`) when the LLM trims a boundary stumble.
 4. **Layer 4 — Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`)**:
    - Merges consecutive `Sentence ID`s across adjacent EDL clips when the physical inter-word gap is `< 0.40 s` and no `Sentence ID` was skipped, eliminating artificial internal jump-cuts and redundant micro-fades inside continuous sentences.
-5. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
+5. **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Quality Audit (`edl_auditor.py`)**:
+   - Enforces `source_out >= t_last`, resolves boundary micro-overlaps, merges `< 0.45 s` flash-frame micro-clips, and generates an 8-dimension rough-cut audit report (`_edl_report.md` and `_edl_report.json`) with a top-level `agent_verdict` quality gate.
+6. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
    - Places cut-in points 80 ms before vocal cord vibration and dynamically calculates lead-in/lead-out margins from presenter Characters Per Second (CPS) while enforcing `true_speech_end >= t_last`.
-6. **15 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
+7. **15 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
    - Uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`) to skip discarded footage without decoding it, combined with Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15 ms equal-power micro-fades (`afade=t=in:d=0.015:curve=iqsin` and `afade=t=out:d=0.015:curve=qsin`) at every cut boundary.
-7. **Multi-NLE Timeline Interoperability (`exporters.py`)**:
+8. **Multi-NLE Timeline Interoperability (`exporters.py`)**:
    - Exports frame-accurate **Final Cut Pro 7 XML** (`.xml` for Adobe Premiere Pro and DaVinci Resolve), **Apple Final Cut Pro FCPXML** (`.fcpxml`), **CMX 3600 EDL** (`.edl`), and **CSV** cut lists across standard frame rates (`23.976` to `60` fps).
 
 ---
@@ -51,11 +53,12 @@ video-trimmer/
 │       ├── SKILL.md                         # Agent Skill specification and operational manual
 │       ├── scripts/                         # Canonical core engine modules (SSOT)
 │       │   ├── __init__.py
-│       │   ├── video_trimmer.py             # CLI parser and 4-layer pipeline orchestrator
+│       │   ├── video_trimmer.py             # CLI parser and 5-layer pipeline orchestrator
 │       │   ├── constants.py                 # Named constants
 │       │   ├── exceptions.py                # Exception hierarchy
 │       │   ├── acoustic.py                  # CPS calculation, onset snapping, and tail margins
 │       │   ├── transcribe.py                # Acoustic clause segmentation, word trimming, and coalescing
+│       │   ├── edl_auditor.py               # Surgical micro-window repair, timing sanitizer, and 8-D audit
 │       │   ├── gemini_client.py             # Vertex AI (ADC) client and dual-mode prompt builder
 │       │   ├── gcs_utils.py                 # Cloud Storage staging, Google Drive cache, and CJK recovery
 │       │   ├── exporters.py                 # FCP7 XML, FCPXML, EDL, and CSV timeline exporters
@@ -69,7 +72,7 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (83 tests)
+└── tests/                                   # Offline unit test suite (91 tests)
 ```
 
 ---
@@ -165,6 +168,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cac
 | `--suffix` | | `None` | Custom filename suffix tag |
 | `--crf` | | `18` | FFmpeg H.264 quality factor (`18` is visually lossless) |
 | `--skip-whisper` | | `False` | Skip Whisper transcription and use energy-only onset detection |
+| `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False` |
 | `--verbose` | | `False` | Enable debug logging |
 
 ---
@@ -176,9 +180,11 @@ For an input video `raw_footage.mp4`, the tool automatically creates an `output/
 1. **`output/raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 15 ms equal-power audio crossfades.
 2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve**.
 3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML timeline for **Final Cut Pro**.
-4. **`output/raw_footage_<tag>_edl.json`**: Structured cut list with selected sentences, CPS values, and timestamps.
+4. **`output/raw_footage_<tag>_edl.json`**: Structured cut list with `agent_verdict`, selected sentences, CPS values, and timestamps.
 5. **`output/raw_footage_<tag>_edl.csv`**: Spreadsheet cut table with editorial notes.
-6. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
+6. **`output/raw_footage_<tag>_edl_report.md`**: 8-dimension human-readable rough-cut quality audit report.
+7. **`output/raw_footage_<tag>_edl_report.json`**: Machine-readable audit report with top-level `agent_verdict`.
+8. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
 
 ---
 

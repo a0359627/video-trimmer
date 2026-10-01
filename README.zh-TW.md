@@ -23,17 +23,19 @@
 2. **第二層：雙模式 LLM 語意擇優 (`gemini-3.8-flash`)**：
    - **Mode A：有講稿單調錨定模式（傳入 `--script`）**：自動將講稿切分為 `[Script Block 01] .. [Script Block NN]`，嚴格依序單調對齊，每個講稿段落最多僅保留最後一次完整成功的 Take，徹底杜絕講稿句子重複出現。
    - **Mode B：無講稿意圖視窗仲裁模式（未傳 `--script`）**：以局部語意視窗識別「未完成殘句重講（Abandoned Fragment）」並予以剔除，同時保護「刻意修辭排比強調（如：請訂閱、請訂閱、請訂閱）」不被誤刪。
-   - **跨片段首尾防重疊檢查（Tail-to-Head Overlap Check）**：防止相鄰輸出片段出現首尾重複子句。
+   - **局部小視窗精準重掃（Surgical Micro-Window Repair，`edl_auditor.py`）**：於進入 FFmpeg 渲染前，自動檢查初版 EDL 是否存在遺漏的講稿區塊（Mode A）、未綁定 `Sentence ID` 的片段或相鄰疑似重講句；若發現異常，僅針對該 `15s–90s` 局部視訊區間透過 Vertex AI `VideoMetadata(start_offset=..., end_offset=...)` 發起單次重掃修補，完全避開全片 Agentic 的 Timeout 風險。
 3. **第三層：子句展開與逐字稿邊界精修 (`resolve_clip_sub_units`)**：
    - 將多句跨度自動展開為獨立的 `Sentence ID` 子單元，自動略過時間區間內未被選中的 NG 句。
    - 當 LLM 在 `transcript` 欄位修剪了句首或句尾贅字時，透過 `_trim_matched_words_by_transcript` 自動將 `t_first` 與 `t_last` 對齊至實際保留字詞的 Whisper 邊界。
 4. **第四層：跨片段連貫小句無縫合一 (`coalesce_adjacent_sub_units`)**：
    - 當相鄰片段為連續 `Sentence ID`（中間未跳過任何 NG 句）且物理字間距 `< 0.40s` 時，自動合併為單一連續片段，消除長句內部的無謂跳接（Jump-Cut）與多餘微淡化。
-5. **聲學起音鎖定與字尾塞音保護 (`acoustic.py`)**：
+5. **第五層：物理時間軸確定性自癒與 8 維度品質審計 (`edl_auditor.py`)**：
+   - 自動消解相鄰邊界微重疊、強制保底 `source_out >= t_last`（保護字尾塞音）、自動縫合 `< 0.45s` 閃幀微碎切，並同步輸出 `<base>_<tag>_edl_report.md` 與含頂層 `agent_verdict` 品質閘門的 `<base>_<tag>_edl_report.json`。
+6. **聲學起音鎖定與字尾塞音保護 (`acoustic.py`)**：
    - 將剪輯入點鎖定於聲帶發聲前 80 ms，並依據講者語速（CPS）動態計算緩衝邊界，強制 `true_speech_end >= t_last` 以保護字尾無聲除阻音與鼻音。
-6. **15 ms 等功率音訊微淡化與關鍵幀硬體加速渲染 (`render.py`)**：
+7. **15 ms 等功率音訊微淡化與關鍵幀硬體加速渲染 (`render.py`)**：
    - 每個保留片段採用前置 `-ss` / `-to` 關鍵幀快速定位（Fast Input Seeking，免除廢片區段解碼），結合 Apple Silicon `VideoToolbox` 硬體編解碼（`-hwaccel videotoolbox` + `h264_videotoolbox`，具備 `libx264` 自動降級備援）、1 秒關鍵幀間距（`-g 30`）與 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 與 `afade=t=out:d=0.015:curve=qsin`），消除跳接爆音並大幅提升成片渲染與快轉速度。
-7. **多平台 NLE 時間軸匯出 (`exporters.py`)**：
+8. **多平台 NLE 時間軸匯出 (`exporters.py`)**：
    - 支援匯出 **Final Cut Pro 7 XML**（`.xml`，適用於 Adobe Premiere Pro 與 DaVinci Resolve）、**Apple Final Cut Pro FCPXML**（`.fcpxml`）、**CMX 3600 EDL**（`.edl`）與 **CSV** 剪輯表。
 
 ---
@@ -50,9 +52,10 @@ video-trimmer/
 │       ├── SKILL.md                         # 技能規範與自動化執行手冊
 │       ├── scripts/                         # 核心引擎模組實體目錄 (SSOT)
 │       │   ├── __init__.py
-│       │   ├── video_trimmer.py             # CLI 解析與四層管線協調器
+│       │   ├── video_trimmer.py             # CLI 解析與五層管線協調器
 │       │   ├── acoustic.py                  # CPS 語速計算、聲學起音鎖定與字尾保護
 │       │   ├── transcribe.py                # 聲學切句、逐字邊界精修與跨片段無縫合一
+│       │   ├── edl_auditor.py               # 局部小視窗精準重掃、時間軸自癒與 8 維度品質審計
 │       │   ├── gemini_client.py             # Vertex AI (ADC) 客戶端與雙模式提示詞建構
 │       │   ├── gcs_utils.py                 # GCS 暫存、Google Drive 快取與中文檔名修復
 │       │   ├── exporters.py                 # FCP7 XML、FCPXML、EDL 與 CSV 時間軸匯出
@@ -61,7 +64,7 @@ video-trimmer/
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
-└── tests/                                   # 離線單元測試套件（83 項測試）
+└── tests/                                   # 離線單元測試套件（91 項測試）
 ```
 
 ---
@@ -104,7 +107,7 @@ chmod +x setup.sh
 
 ## 命令列使用說明 (CLI Usage)
 
-預設情況下，所有產出檔案（`_trimmed.mp4`、`.xml`、`.fcpxml`、`.json`、`.csv` 與 `_whisper_raw.json`）皆會自動隔離儲存於原始影片目錄下的 `output/` 子目錄（Google Drive 連結則為 `./output/`），亦可使用 `-o` 指定自訂輸出目錄：
+預設情況下，所有產出檔案（`_trimmed.mp4`、`.xml`、`.fcpxml`、`.json`、`.csv`、`_edl_report.md`、`_edl_report.json` 與 `_whisper_raw.json`）皆會自動隔離儲存於原始影片目錄下的 `output/` 子目錄（Google Drive 連結則為 `./output/`），亦可使用 `-o` 指定自訂輸出目錄：
 
 ```bash
 # Mode B：無講稿自動粗剪（預設採用 Static Multimodal 快速模式，產出物自動存於 <input_dir>/output/）

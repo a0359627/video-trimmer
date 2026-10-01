@@ -22,13 +22,16 @@
 2. **レイヤー 2：デュアルモード LLM テイク選定 (`gemini-3.8-flash`)**：
    - **Mode A：スクリプトアンカー単調アライメント（`--script` 指定時）**：台本を `[Script Block 01] .. [Script Block NN]` に分割し、単調順序で各ブロック最大 1 つの最終成功テイクのみを採用します。
    - **Mode B：台本なしインテントウィンドウ調停（`--script` 省略時）**：途中放棄された断片（Abandoned Fragment）を除去しつつ、意図的な反復強調表現（3 回繰り返す強調など）を保護します。
+   - **局所マイクロウィンドウ再スキャン（Surgical Micro-Window Repair、`edl_auditor.py`）**：FFmpeg レンダリング前に、台本ブロックの欠落（Mode A）、`Sentence ID` 未紐付けクリップ、または隣接リテイク候補を検出し、該当する `15s–90s` の短区間のみを `VideoMetadata` で再スキャンしてタイムアウトを回避します。
 3. **レイヤー 3：サブユニット展開と単語境界トリミング (`resolve_clip_sub_units`)**：
    - 複数文の範囲を個別の `Sentence ID` に展開し、`transcript` に合わせて語頭・語尾の Whisper 単語境界（`_trim_matched_words_by_transcript`）を精密に整列させます。
 4. **レイヤー 4：グローバル・クリップ間結合 (`coalesce_adjacent_sub_units`)**：
    - 隣接クリップが連続する `Sentence ID` であり、単語間ギャップが `< 0.40s` の場合、単一の連続クリップに自動統合し、文中の不自然なジャンプカットを排除します。
-5. **音響オンセット・スナッピング、15 ms 等パワー音声マイクロクロスフェード＆キーフレーム・ハードウェア高速レンダリング (`acoustic.py` / `render.py`)**：
+5. **レイヤー 5：決定論的タイムライン自己修復＆ 8 次元品質監査 (`edl_auditor.py`)**：
+   - 境界の微小重複解消、`source_out >= t_last` の保証、`< 0.45s` のマイクロクリップ統合を行い、`agent_verdict` 品質ゲート付きの監査レポート（`_edl_report.md` / `_edl_report.json`）を出力します。
+6. **音響オンセット・スナッピング、15 ms 等パワー音声マイクロクロスフェード＆キーフレーム・ハードウェア高速レンダリング (`acoustic.py` / `render.py`)**：
    - 声帯振動の 80 ms 前にカット点を配置し、各クリップで `-ss` / `-to` 前置キーフレーム高速シーク（NG 区間のデコード省略）、Apple Silicon `VideoToolbox` ハードウェア加減速（`-hwaccel videotoolbox` + `h264_videotoolbox`、`libx264` 自動フォールバック付き）、1 秒 GOP（`-g 30`）、および 15 ms マイクロフェード（`afade=t=in:d=0.015:curve=iqsin` / `afade=t=out:d=0.015:curve=qsin`）を適用します。
-6. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力**：
+7. **Agent Plugins 1.0 準拠構造とマルチ NLE タイムライン出力**：
    - コアスクリプトとプロンプトは `skills/video-trimmer/scripts/` および `skills/video-trimmer/prompts/`（SSOT）に配置され、ルート直下のシンボリックリンクを持たない純粋な構成と 2 層 `AGENTS.md` / `rules/AGENTS.md` を備えています。**FCP7 XML**、**FCPXML**、**CMX 3600 EDL**、**CSV** を出力します。
 
 ---

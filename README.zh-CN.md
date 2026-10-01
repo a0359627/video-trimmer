@@ -22,13 +22,16 @@
 2. **第二层：双模式 LLM 语义择优 (`gemini-3.8-flash`)**：
    - **Mode A：有讲稿单调锚定模式（传入 `--script`）**：将讲稿格式化为 `[Script Block 01] .. [Script Block NN]`，严格依序单调对齐，每个讲稿段落最多保留最后一次完整成功的 Take。
    - **Mode B：无讲稿意图视窗仲裁模式（未传 `--script`）**：剔除未完成残句重录（Abandoned Fragment），同时保护刻意修辞排比强调（如三遍重复强调）。
+   - **局部小视窗精准重扫（Surgical Micro-Window Repair，`edl_auditor.py`）**：在进入 FFmpeg 渲染前，自动检测遗漏的讲稿段落（Mode A）、未绑定 `Sentence ID` 的片段或相邻疑似重录句，并仅针对该 `15s–90s` 局部视频视窗通过 `VideoMetadata` 发起单次重扫修补，避免全片 Timeout。
 3. **第三层：子句展开与逐字稿边界精修 (`resolve_clip_sub_units`)**：
    - 将多句跨度展开为独立的 `Sentence ID` 子单元，并依据 `transcript` 自动精修首尾词边界（`_trim_matched_words_by_transcript`）。
 4. **第四层：跨片段连贯小句无缝合一 (`coalesce_adjacent_sub_units`)**：
    - 当相邻片段为连续 `Sentence ID` 且物理字间距 `< 0.40s` 时，自动合并为单一连续片段，消除长句内部的跳接（Jump-Cut）。
-5. **声学起音锁定、15 ms 等功率微交叉淡化与关键帧硬件加速渲染 (`acoustic.py` / `render.py`)**：
+5. **第五层：物理时间轴确定性自愈与 8 维度质量审计 (`edl_auditor.py`)**：
+   - 自动消除相邻边界微重叠、强制保底 `source_out >= t_last`、合并 `< 0.45s` 闪帧微碎切，并生成 `<base>_<tag>_edl_report.md` 与含顶层 `agent_verdict` 质量门禁的 `<base>_<tag>_edl_report.json`。
+6. **声学起音锁定、15 ms 等功率微交叉淡化与关键帧硬件加速渲染 (`acoustic.py` / `render.py`)**：
    - 将剪辑入点锁定在声带振动前 80 ms；成片渲染采用每片段前置 `-ss` / `-to` 关键帧快速定位（跳过废片解码）、Apple Silicon `VideoToolbox` 硬件编解码（`-hwaccel videotoolbox` + `h264_videotoolbox`，支持 `libx264` 自动降级）、1 秒 GOP（`-g 30`）与 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 与 `afade=t=out:d=0.015:curve=qsin`）。
-6. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出**：
+7. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出**：
    - 核心代码与提示词位于 `skills/video-trimmer/scripts/` 与 `skills/video-trimmer/prompts/`（SSOT），无根目录冗余软链接，并提供双层 `AGENTS.md` / `rules/AGENTS.md` 规范；支持导出 **FCP7 XML**、**FCPXML**、**CMX 3600 EDL** 与 **CSV**。
 
 ---

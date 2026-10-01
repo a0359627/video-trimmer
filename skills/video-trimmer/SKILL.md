@@ -78,7 +78,10 @@ video-trimmer/
    - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15ms `afade` equal-power micro-fades (`iqsin`/`qsin`) across all cut boundaries.
 8. **Production Script Injection (`--script`)**:
    - Ingests production shooting scripts (`.md` / `.txt`) to guide section-by-section matching and prevent skipping intended talking points.
-9. **Universal NLE Project Export**:
+9. **Pre-Render Surgical Micro-Window Repair & 8-Dimension Quality Audit (`edl_auditor.py`)**:
+   - Before FFmpeg rendering, detects missing script blocks (Mode A), unanchored clips, or adjacent retake candidates and re-scans only the affected `15s–90s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, avoiding full-video gateway timeouts.
+   - Deterministically sanitizes boundary overlaps, enforces `source_out >= t_last`, merges `< 0.45s` flash-frame micro-clips, and outputs `<base>_<tag>_edl_report.md` and `<base>_<tag>_edl_report.json` with a top-level `agent_verdict`.
+10. **Universal NLE Project Export**:
    - Generates industry-standard **FCP 7 XML** (Adobe Premiere Pro & DaVinci Resolve) and **FCPXML** (Final Cut Pro X), alongside direct high-quality **MP4** renders.
 
 ---
@@ -106,7 +109,7 @@ gcloud auth application-default login
 
 ### Step 2: Execute Primary Video Trimmer Pipeline
 
-Default execution uses fast Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) and automatically isolates all generated deliverables inside `<input_dir>/output/` (`./output/` for Google Drive links). Pass `--agentic` only when the user explicitly requests Agentic Video Understanding.
+Default execution uses fast Static Multimodal mode (`MEDIA_RESOLUTION_LOW`), performs automatic surgical micro-window repair (`15s–90s` windows) for any pre-render anomalies, and isolates all generated deliverables inside `<input_dir>/output/` (`./output/` for Google Drive links). Pass `--agentic` only when the user explicitly requests full-video Agentic Video Understanding.
 
 ```bash
 # Standard automatic rough-cut (outputs isolated in <input_dir>/output/ by default, Cwd = <PLUGIN_ROOT>):
@@ -122,8 +125,12 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --script "/path/to/shooting_script.md" -o "/path/to/output_dir"
 ```
 
-### Step 3: Fast Local Iteration (Cached EDL Workflow)
-To adjust pacing, fine-tune margins, or re-render without re-incurring cloud API inference:
+### Step 3: Deliverable Verification, `agent_verdict` Quality Gate, & Cached Local Iteration
+Verify that all required deliverables exist in `<input_dir>/output/` and inspect `agent_verdict` in `<base>_<tag>_edl_report.json`:
+- If `agent_verdict.pass_quality_gate == true` (`suggested_action == "DELIVER"`), deliver the outputs to the user.
+- If `agent_verdict.pass_quality_gate == false` (`suggested_action == "ONE_SHOT_REMEDIATE"`, or exit code `2` when `--strict` is enabled), execute at most **1** remediation run using `remediation_cmd`.
+
+To adjust pacing, fine-tune margins, or re-render locally without re-incurring cloud API inference:
 ```bash
 python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.mp4" --cached-json "/path/to/output/raw_footage_static_edl.json" --suffix "fine_tuned"
 ```
@@ -148,6 +155,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
+| `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
 
 ---
@@ -158,9 +166,11 @@ For an input file `raw_footage.mp4`, the skill isolates all generated files insi
 1. `output/raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 15ms micro-fades.
 2. `output/raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve**.
 3. `output/raw_footage_<suffix>_edl.fcpxml`: FCPXML timeline for **Final Cut Pro X**.
-4. `output/raw_footage_<suffix>_edl.json`: Structured decision metadata with per-clip CPS and margins.
+4. `output/raw_footage_<suffix>_edl.json`: Structured decision metadata with `agent_verdict`, per-clip CPS, and margins.
 5. `output/raw_footage_<suffix>_edl.csv`: Spreadsheet table with visual/audio validation notes.
-6. `output/raw_footage_whisper_raw.json`: Word-level semantic sentence transcript cache.
+6. `output/raw_footage_<suffix>_edl_report.md`: 8-dimension human-readable rough-cut quality audit report.
+7. `output/raw_footage_<suffix>_edl_report.json`: Machine-readable audit report with top-level `agent_verdict`.
+8. `output/raw_footage_whisper_raw.json`: Word-level semantic sentence transcript cache.
 
 ---
 
