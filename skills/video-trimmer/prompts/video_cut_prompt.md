@@ -15,9 +15,10 @@
 2. **嚴禁拼湊殘缺碎片（Prohibition of Fragment Splicing）**：
    - 若講者先講了半句卡住（例如 Sentence A），接著退回句首重講完整的一句（Sentence B），**絕對不可同時選入 Sentence A 與 Sentence B**，僅能選入完整的 Sentence B！
    - 嚴禁為了湊齊字數，將前一次 NG 嘗試的前半句與後一次重講的後半句拼湊在一起。
-3. **跨句首尾無縫檢查（Tail-to-Head Overlap Check）**：
-   - 在選定一組 `sentence_ids` 後，務必檢查前一個入選 `Sentence ID` 的結尾台詞，是否與下一個入選 `Sentence ID` 的開頭台詞重複（例如講者順著講完第 1 句後，試圖接第 2 句卻吃螺絲，隨後在下一個 `Sentence ID` 重講第 2 句）。
-   - 若前一個 `Sentence ID` 的句尾夾帶了下一句的 NG 開頭，務必剔除該 NG 子句 ID，並在 `transcript` 欄位中**僅寫入需要保留的乾淨台詞文字**（後續聲學引擎將自動依 `transcript` 字級時間戳裁除句尾殘留廢話）。
+3. **跨句首尾重疊與句內口誤修剪（Tail-to-Head & Intra-Sentence Stumble Trimming）**：
+   - **跨句首尾無縫檢查（Tail-to-Head Overlap）**：在選定一組 `sentence_ids` 後，務必檢查前一個入選 `Sentence ID` 的結尾台詞，是否與下一個入選 `Sentence ID` 的開頭台詞重複（例如講者順著講完第 1 句後，試圖接第 2 句卻吃螺絲，隨後在下一個 `Sentence ID` 重講第 2 句）。若前句句尾夾帶了下一句的 NG 開頭，務必剔除該 NG 子句 ID，並在 `transcript` 欄位中**僅寫入需要保留的乾淨台詞文字**（徹底刪除句尾殘留的 NG 字詞）。
+   - **單句內部無停頓重講修剪（Intra-Sentence Repeat `A + A + B`）**：若講者重講時換氣極短，導致同一個 `Sentence ID` 內同時包含「前半截口誤 `A` + 緊接著重講的完整句 `A + B`」，請在 `transcript` 欄位中**僅輸出最後一次完整流暢的 `A + B` 文字**（刪除前面的重複前綴 `A`）。後續聲學引擎將自動依 `transcript` 鎖定第二次開口的精確字級時間戳！
+   - **同音錯字校正（ASR Homophone Cleanup）**：若 Whisper 逐字稿含有明顯同音辨識錯字（特別是在 Mode A 有參考講稿可對照時），請在 `transcript` 中修正為正確字詞，但字數與語序必須嚴格對應保留區間內實際發音的台詞。
 4. **刻意修辭重複保護（Preserve Intentional Rhetorical Repetition）**：
    - 當講者為了強調語氣、排比修辭、頂真銜接或呼籲行動而**刻意連續重複完整字句**（例如：「請訂閱，請訂閱，請訂閱，重要的事情要說三遍」），且語氣連貫、無慌張重來之神態時，屬於正式修辭表現，**必須完整保留，不可誤判為 NG 重講**！
 

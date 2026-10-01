@@ -367,3 +367,157 @@ class TestAuditEdlQuality(unittest.TestCase):
         self.assertFalse(verdict["pass_quality_gate"])
         self.assertEqual(verdict["suggested_action"], "ONE_SHOT_REMEDIATE")
         self.assertTrue(any("residual retake" in v for v in verdict["fatal_violations"]))
+
+    def test_tc01_tail_head_retake_detected_in_anomaly_scanner_and_audit_report(self):
+        """TC-01: Detect tail-to-head stumble overlap (including trailing typo) for Gemini micro-window and final audit."""
+        whisper_units = [
+            {
+                "id": 6,
+                "start": 33.0,
+                "end": 51.6,
+                "text": "完美的監控工具其實已經在你家裡了對就是WiFi你大概也聽過WiFi訊號撞到人體會產生細微摔",
+                "is_target_speaker": True,
+            },
+            {
+                "id": 7,
+                "start": 51.7,
+                "end": 62.0,
+                "text": "對就是你家路由器發出的訊號你大概也聽過WiFi訊號撞到人體會出現細微衰減與相位變化",
+                "is_target_speaker": True,
+            },
+        ]
+        model_edl = {
+            "project_title": "Tail-Head Test",
+            "final_edl": [
+                {
+                    "clip_id": 1,
+                    "topic": "Opening",
+                    "sentence_ids": [6],
+                    "source_in": 33.0,
+                    "source_out": 51.6,
+                    "transcript": "完美的監控工具其實已經在你家裡了對就是WiFi你大概也聽過WiFi訊號撞到人體會產生細微摔",
+                },
+                {
+                    "clip_id": 2,
+                    "topic": "Explanation",
+                    "sentence_ids": [7],
+                    "source_in": 51.7,
+                    "source_out": 62.0,
+                    "transcript": "對就是你家路由器發出的訊號你大概也聽過WiFi訊號撞到人體會出現細微衰減與相位變化",
+                },
+            ],
+        }
+        anomalies = detect_micro_window_anomalies(model_edl, whisper_units, total_dur=70.0)
+        self.assertEqual(len(anomalies), 1)
+        self.assertEqual(anomalies[0]["type"], "TAIL_HEAD_RETAKE")
+        self.assertEqual(anomalies[0]["replace_range"], (0, 2))
+
+        report = audit_edl_quality(
+            refined_edl=[
+                dict(model_edl["final_edl"][0], duration=18.6, cps=4.0, in_margin=0.08, out_margin=0.10),
+                dict(model_edl["final_edl"][1], duration=10.3, cps=4.0, in_margin=0.08, out_margin=0.10),
+            ],
+            whisper_units=whisper_units,
+            total_dur=70.0,
+            video_path=Path("/tmp/raw_footage.mp4"),
+        )
+        self.assertFalse(report["agent_verdict"]["pass_quality_gate"])
+        self.assertTrue(any("ERR_TAIL_HEAD_RETAKE" in v for v in report["agent_verdict"]["fatal_violations"]))
+
+    def test_tc02_intra_clip_repeat_detected_in_anomaly_scanner_and_audit_report(self):
+        """TC-02: Detect intra-clip immediate repeat (A + A + B) for Gemini micro-window and final audit."""
+        whisper_units = [
+            {
+                "id": 15,
+                "start": 100.0,
+                "end": 112.0,
+                "text": "研究者推測BFI本來就是壓縮研究者推測BFI本來就是壓縮後的資訊",
+                "is_target_speaker": True,
+            }
+        ]
+        model_edl = {
+            "project_title": "Intra-Repeat Test",
+            "final_edl": [
+                {
+                    "clip_id": 1,
+                    "topic": "BFI",
+                    "sentence_ids": [15],
+                    "source_in": 100.0,
+                    "source_out": 112.0,
+                    "transcript": "研究者推測BFI本來就是壓縮研究者推測BFI本來就是壓縮後的資訊",
+                }
+            ],
+        }
+        anomalies = detect_micro_window_anomalies(model_edl, whisper_units, total_dur=150.0)
+        self.assertEqual(len(anomalies), 1)
+        self.assertEqual(anomalies[0]["type"], "INTRA_CLIP_REPEAT")
+        self.assertEqual(anomalies[0]["replace_range"], (0, 1))
+
+        report = audit_edl_quality(
+            refined_edl=[dict(model_edl["final_edl"][0], duration=12.0, cps=3.5, in_margin=0.08, out_margin=0.10)],
+            whisper_units=whisper_units,
+            total_dur=150.0,
+            video_path=Path("/tmp/raw_footage.mp4"),
+        )
+        self.assertFalse(report["agent_verdict"]["pass_quality_gate"])
+        self.assertTrue(any("ERR_INTRA_CLIP_REPEAT" in v for v in report["agent_verdict"]["fatal_violations"]))
+
+    def test_tc03_script_take_collision_detected_and_repaired(self):
+        """TC-03: Detect partial-take + full-take collision on the same Mode A Script Block (>= 0.45 coverage)."""
+        script_text = "這代表駭客不需要破解你的WiFi密碼，也不需要植入任何木馬程式，只要在門外接收公開訊號就能追蹤。\n"
+        whisper_units = [
+            {
+                "id": 20,
+                "start": 200.0,
+                "end": 206.0,
+                "text": "這代表駭客不需要破解你的WiFi密碼也不需要植入任何木馬",
+                "is_target_speaker": True,
+            },
+            {
+                "id": 21,
+                "start": 207.0,
+                "end": 216.0,
+                "text": "這代表駭客不需要破解你的WiFi密碼也不需要植入任何木馬程式只要在門外接收公開訊號就能追蹤",
+                "is_target_speaker": True,
+            },
+        ]
+        model_edl = {
+            "project_title": "Collision Test",
+            "final_edl": [
+                {
+                    "clip_id": 1,
+                    "topic": "Partial NG",
+                    "sentence_ids": [20],
+                    "source_in": 200.0,
+                    "source_out": 206.0,
+                    "transcript": "這代表駭客不需要破解你的WiFi密碼也不需要植入任何木馬",
+                },
+                {
+                    "clip_id": 2,
+                    "topic": "Full Take",
+                    "sentence_ids": [21],
+                    "source_in": 207.0,
+                    "source_out": 216.0,
+                    "transcript": "這代表駭客不需要破解你的WiFi密碼也不需要植入任何木馬程式只要在門外接收公開訊號就能追蹤",
+                },
+            ],
+        }
+        anomalies = detect_micro_window_anomalies(
+            model_edl, whisper_units, total_dur=250.0, script_text=script_text
+        )
+        self.assertTrue(any(a["type"] in ("POTENTIAL_RESIDUAL_RETAKE", "SCRIPT_TAKE_COLLISION") for a in anomalies))
+
+        report = audit_edl_quality(
+            refined_edl=[
+                dict(model_edl["final_edl"][0], duration=6.0, cps=4.0, in_margin=0.08, out_margin=0.10),
+                dict(model_edl["final_edl"][1], duration=9.0, cps=4.5, in_margin=0.08, out_margin=0.10),
+            ],
+            whisper_units=whisper_units,
+            total_dur=250.0,
+            video_path=Path("/tmp/raw_footage.mp4"),
+            script_text=script_text,
+        )
+        self.assertFalse(report["agent_verdict"]["pass_quality_gate"])
+        self.assertTrue(any("ERR_SCRIPT_TAKE_COLLISION" in v for v in report["agent_verdict"]["fatal_violations"]))
+        self.assertEqual(report["dimensions"]["4_script_coverage"]["script_take_collision_count"], 1)
+

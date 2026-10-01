@@ -3,6 +3,7 @@
 import difflib
 import json
 import logging
+import math
 import re
 import subprocess
 from pathlib import Path
@@ -642,14 +643,74 @@ def filter_ng_retake_sentences(sentences: list[dict], max_lookahead: int = 3, ma
     return kept
 
 
+def _find_best_char_span(tgt_norm: str, whisper_str: str) -> tuple[int, int, int] | None:
+    """
+    Locate the tightest, rightmost character span (start_idx, end_idx_inclusive, matched_chars)
+    of `tgt_norm` inside `whisper_str`.
+
+    ASD-STE100:
+    1. Prefer an exact rightmost substring match (`rfind`) to enforce Last-Take-Wins on
+       intra-sentence repeats (`A + A + B` -> second `A + B`).
+    2. When ASR homophones prevent an exact substring match, slide a bounded window from
+       right to left so earlier aborted prefixes (`A`) are excluded.
+    """
+    if not tgt_norm or not whisper_str:
+        return None
+
+    t_len = len(tgt_norm)
+    w_len = len(whisper_str)
+
+    # 1. Exact rightmost substring match (handles short tokens like "4%" and exact A+A+B repeats)
+    exact_pos = whisper_str.rfind(tgt_norm)
+    if exact_pos != -1:
+        return exact_pos, exact_pos + t_len - 1, t_len
+
+    min_block = 1 if t_len <= 3 else 2
+
+    def _span_in_slice(w_slice: str, offset: int) -> tuple[int, int, int] | None:
+        matcher = difflib.SequenceMatcher(None, tgt_norm, w_slice, autojunk=False)
+        blocks = [b for b in matcher.get_matching_blocks() if b.size >= min_block]
+        if not blocks:
+            return None
+        m_chars = sum(b.size for b in blocks)
+        first_p = offset + blocks[0].b
+        last_p = offset + min(len(w_slice) - 1, blocks[-1].b + blocks[-1].size - 1)
+        return first_p, last_p, m_chars
+
+    full_res = _span_in_slice(whisper_str, 0)
+    if full_res is None:
+        return None
+
+    best_first, best_last, best_matched = full_res
+
+    # 2. If whisper_str is meaningfully longer than tgt_norm, scan rightmost bounded windows
+    #    to avoid SequenceMatcher anchoring the prefix on an earlier intra-sentence stumble.
+    if w_len > t_len + 2:
+        win_len = min(w_len, max(t_len + 4, int(math.ceil(t_len * 1.25))))
+        for start_idx in range(w_len - win_len, -1, -1):
+            cand = _span_in_slice(whisper_str[start_idx : start_idx + win_len], start_idx)
+            if cand is None:
+                continue
+            c_first, c_last, c_matched = cand
+            c_span = c_last - c_first + 1
+            best_span = best_last - best_first + 1
+            # Prefer a tighter, rightmost window that retains equivalent character coverage
+            if c_matched >= max(best_matched - 1, int(t_len * 0.75)) and (
+                c_span < best_span - 1 or (c_span <= best_span and c_first > best_first)
+            ):
+                best_first, best_last, best_matched = c_first, c_last, c_matched
+
+    return best_first, best_last, best_matched
+
+
 def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript: str) -> list[dict]:
     """
     Trim leading and trailing words of matched sentences to match the LLM-selected transcript.
 
     ASD-STE100:
-    Align the LLM transcript string with the Whisper word timeline.
-    When the LLM omits a leading or trailing stumble from a selected sentence,
-    trim the word list to the matched character boundaries.
+    Align the LLM transcript string with the Whisper word timeline using rightmost window matching.
+    When the LLM omits a leading or trailing stumble from a selected sentence, trim the word list
+    to the matched character boundaries and set `trimmed_head` / `trimmed_tail` flags.
     """
     if not transcript or not matched_sentences:
         return matched_sentences
@@ -671,20 +732,20 @@ def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript:
     if not tgt_norm or not whisper_str or len(tgt_norm) >= len(whisper_str) * 0.95:
         return matched_sentences
 
-    matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
-    blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
-    if not blocks:
+    span = _find_best_char_span(tgt_norm, whisper_str)
+    if span is None:
         return matched_sentences
 
-    matched_chars = sum(b.size for b in blocks)
-    if matched_chars < max(3, len(tgt_norm) * 0.60):
+    first_char_pos, last_char_pos, matched_chars = span
+    min_required = len(tgt_norm) if len(tgt_norm) <= 3 else max(3, int(len(tgt_norm) * 0.60))
+    if matched_chars < min_required:
         return matched_sentences
-
-    first_char_pos = blocks[0].b
-    last_char_pos = min(len(char_timeline) - 1, blocks[-1].b + blocks[-1].size - 1)
 
     first_s_idx, first_w_idx, _ = char_timeline[first_char_pos]
     last_s_idx, last_w_idx, _ = char_timeline[last_char_pos]
+
+    head_was_trimmed = first_char_pos > 0
+    tail_was_trimmed = last_char_pos < (len(char_timeline) - 1)
 
     trimmed = []
     for s_idx in range(first_s_idx, last_s_idx + 1):
@@ -705,6 +766,10 @@ def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript:
         s_copy["start"] = sliced_words[0]["start"]
         s_copy["end"] = sliced_words[-1]["end"]
         s_copy["text"] = "".join(w.get("word", "") for w in sliced_words).strip()
+        if s_idx == first_s_idx and (head_was_trimmed or w_start > 0):
+            s_copy["trimmed_head"] = True
+        if s_idx == last_s_idx and (tail_was_trimmed or w_end < len(words)):
+            s_copy["trimmed_tail"] = True
         trimmed.append(s_copy)
 
     return trimmed if trimmed else matched_sentences
@@ -716,7 +781,7 @@ def _split_sentence_words_by_internal_gap(sentence: dict, max_word_gap: float = 
 
     ASD-STE100:
     Divide a sentence at physical silence gaps (>= max_word_gap) so the acoustic engine
-    can tighten dead air inside a single sentence.
+    can tighten dead air inside a single sentence, and preserve `trimmed_head` / `trimmed_tail` flags.
     """
     words = [w for w in sentence.get("words", []) if w.get("is_target_speaker", True)]
     if not words:
@@ -727,6 +792,8 @@ def _split_sentence_words_by_internal_gap(sentence: dict, max_word_gap: float = 
             "t_first": float(sentence.get("start", 0.0)),
             "t_last": float(sentence.get("end", 0.0)),
             "text": sentence.get("text", "").strip(),
+            "trimmed_head": bool(sentence.get("trimmed_head", False)),
+            "trimmed_tail": bool(sentence.get("trimmed_tail", False)),
         }]
 
     chunks = []
@@ -739,6 +806,8 @@ def _split_sentence_words_by_internal_gap(sentence: dict, max_word_gap: float = 
                 "t_first": float(cur_words[0]["start"]),
                 "t_last": float(cur_words[-1]["end"]),
                 "text": "".join(x.get("word", "") for x in cur_words).strip(),
+                "trimmed_head": False,
+                "trimmed_tail": False,
             })
             cur_words = [w]
         else:
@@ -750,7 +819,13 @@ def _split_sentence_words_by_internal_gap(sentence: dict, max_word_gap: float = 
             "t_first": float(cur_words[0]["start"]),
             "t_last": float(cur_words[-1]["end"]),
             "text": "".join(x.get("word", "") for x in cur_words).strip(),
+            "trimmed_head": False,
+            "trimmed_tail": False,
         })
+
+    if chunks:
+        chunks[0]["trimmed_head"] = bool(sentence.get("trimmed_head", False))
+        chunks[-1]["trimmed_tail"] = bool(sentence.get("trimmed_tail", False))
 
     return chunks
 
@@ -769,18 +844,22 @@ def resolve_clip_sub_units(
     1. Read `sentence_ids` first, or fall back to `start_sentence_id`..`end_sentence_id`.
     2. Align word boundaries to `clip_data["transcript"]` when the LLM trims a boundary stumble.
     3. Preserve all LLM-selected sentences without Python string-similarity deletion.
-    4. Coalesce consecutive sentence IDs when the physical gap is below max_internal_gap (0.40s),
-       and split when an ID is skipped or when a pause is >= max_internal_gap.
+    4. Coalesce consecutive sentence IDs when the physical gap is below max_internal_gap (0.40s)
+       and neither boundary was trimmed by the LLM.
     """
     if not whisper_units:
         t_first, t_last, prev_end, next_start = align_clip_with_whisper(whisper_units, clip_data, total_dur)
+        raw_t = clip_data.get("transcript", "") or clip_data.get("content", "")
         return [{
             "sentence_ids": [],
             "t_first": t_first,
             "t_last": t_last,
             "prev_sentence_end": prev_end,
             "next_sentence_start": next_start,
-            "transcript": clip_data.get("transcript", "") or clip_data.get("content", ""),
+            "transcript": raw_t,
+            "whisper_transcript": raw_t,
+            "trimmed_head": False,
+            "trimmed_tail": False,
         }]
 
     matched = []
@@ -811,13 +890,17 @@ def resolve_clip_sub_units(
 
     if not matched:
         t_first, t_last, prev_end, next_start = align_clip_with_whisper(whisper_units, clip_data, total_dur)
+        raw_t = clip_data.get("transcript", "") or clip_data.get("content", "")
         return [{
             "sentence_ids": [],
             "t_first": t_first,
             "t_last": t_last,
             "prev_sentence_end": prev_end,
             "next_sentence_start": next_start,
-            "transcript": clip_data.get("transcript", "") or clip_data.get("content", ""),
+            "transcript": raw_t,
+            "whisper_transcript": raw_t,
+            "trimmed_head": False,
+            "trimmed_tail": False,
         }]
 
     # Filter out off-screen crew sentences (is_target_speaker == False)
@@ -825,10 +908,18 @@ def resolve_clip_sub_units(
     if target_matched:
         matched = target_matched
 
+    orig_first_sid = matched[0].get("id")
+    orig_last_sid = matched[-1].get("id")
+
     # Trim leading/trailing words if LLM transcript excluded a boundary stumble
-    clip_transcript = clip_data.get("transcript", "") or clip_data.get("content", "")
+    clip_transcript = (clip_data.get("transcript", "") or clip_data.get("content", "")).strip()
     if clip_transcript:
         matched = _trim_matched_words_by_transcript(matched, clip_transcript)
+        if matched:
+            if matched[0].get("id") != orig_first_sid:
+                matched[0] = dict(matched[0], trimmed_head=True)
+            if matched[-1].get("id") != orig_last_sid:
+                matched[-1] = dict(matched[-1], trimmed_tail=True)
 
     # Split sentences at internal dead-air pauses (>= max_word_gap)
     fine_chunks = []
@@ -844,15 +935,21 @@ def resolve_clip_sub_units(
             "prev_sentence_end": prev_end,
             "next_sentence_start": next_start,
             "transcript": clip_transcript,
+            "whisper_transcript": clip_transcript,
+            "trimmed_head": False,
+            "trimmed_tail": False,
         }]
 
-    # Coalesce consecutive chunks when gap < max_internal_gap and no Sentence ID was skipped
+    # Coalesce consecutive chunks when gap < max_internal_gap, no Sentence ID was skipped,
+    # and neither side of the boundary was trimmed by the LLM.
     grouped_units = []
     cur_group = {
         "sentence_ids": [fine_chunks[0]["sentence_id"]],
         "t_first": fine_chunks[0]["t_first"],
         "t_last": fine_chunks[0]["t_last"],
         "texts": [fine_chunks[0]["text"]],
+        "trimmed_head": bool(fine_chunks[0].get("trimmed_head", False)),
+        "trimmed_tail": bool(fine_chunks[0].get("trimmed_tail", False)),
     }
 
     for ch in fine_chunks[1:]:
@@ -860,25 +957,30 @@ def resolve_clip_sub_units(
         prev_sid = cur_group["sentence_ids"][-1]
         cur_sid = ch["sentence_id"]
         skipped_sentence = cur_sid > prev_sid + 1
+        trimmed_boundary = bool(cur_group.get("trimmed_tail")) or bool(ch.get("trimmed_head"))
 
-        if gap >= max_internal_gap or skipped_sentence:
+        if gap >= max_internal_gap or skipped_sentence or trimmed_boundary:
             grouped_units.append(cur_group)
             cur_group = {
                 "sentence_ids": [cur_sid],
                 "t_first": ch["t_first"],
                 "t_last": ch["t_last"],
                 "texts": [ch["text"]],
+                "trimmed_head": bool(ch.get("trimmed_head", False)),
+                "trimmed_tail": bool(ch.get("trimmed_tail", False)),
             }
         else:
             if cur_sid not in cur_group["sentence_ids"]:
                 cur_group["sentence_ids"].append(cur_sid)
             cur_group["t_last"] = ch["t_last"]
             cur_group["texts"].append(ch["text"])
+            cur_group["trimmed_tail"] = bool(ch.get("trimmed_tail", False))
 
     grouped_units.append(cur_group)
 
     all_bounds = [(float(u.get("start", 0.0)), float(u.get("end", 0.0))) for u in whisper_units]
     sub_units = []
+    is_single_group = len(grouped_units) == 1
     for idx, g in enumerate(grouped_units):
         t_f = g["t_first"]
         t_l = g["t_last"]
@@ -894,13 +996,19 @@ def resolve_clip_sub_units(
         next_start = min(next_starts) if next_starts else None
 
         sub_text = " ".join(t for t in g["texts"] if t).strip()
+        # Preserve Gemini's cleaned transcript when the clip resolves to a single sub-unit,
+        # while always retaining raw Whisper words in `whisper_transcript` for dual-track auditing.
+        primary_transcript = (clip_transcript if (is_single_group and clip_transcript) else sub_text) or clip_transcript
         sub_units.append({
             "sentence_ids": list(g["sentence_ids"]),
             "t_first": t_f,
             "t_last": t_l,
             "prev_sentence_end": prev_end,
             "next_sentence_start": next_start,
-            "transcript": sub_text or clip_transcript,
+            "transcript": primary_transcript,
+            "whisper_transcript": sub_text or primary_transcript,
+            "trimmed_head": bool(g.get("trimmed_head", False)),
+            "trimmed_tail": bool(g.get("trimmed_tail", False)),
         })
 
     return sub_units
@@ -911,12 +1019,12 @@ def coalesce_adjacent_sub_units(
     max_internal_gap: float = 0.40,
 ) -> list[dict]:
     """
-    Coalesce consecutive sub-units across clip boundaries when no sentence ID is skipped
-    and the physical pause is below max_internal_gap.
+    Coalesce consecutive sub-units across clip boundaries when no sentence ID is skipped,
+    neither boundary was trimmed by the LLM, and the physical pause is below max_internal_gap.
 
     ASD-STE100:
-    Prevent artificial jump-cuts and margin collisions when the LLM splits a continuous take
-    across two adjacent EDL clip entries.
+    Prevent artificial jump-cuts when the LLM splits a continuous take across two clips,
+    while never re-merging across a boundary where the LLM trimmed a speech stumble.
     """
     if len(expanded_units) <= 1:
         return list(expanded_units)
@@ -933,8 +1041,9 @@ def coalesce_adjacent_sub_units(
             and bool(curr_sids)
             and 0 <= (int(curr_sids[0]) - int(prev_sids[-1])) <= 1
         )
+        has_trimmed_boundary = bool(prev.get("trimmed_tail")) or bool(unit.get("trimmed_head"))
 
-        if is_contiguous_sid and 0.0 <= gap < max_internal_gap:
+        if is_contiguous_sid and not has_trimmed_boundary and 0.0 <= gap < max_internal_gap:
             merged_sids = list(prev_sids)
             for sid in curr_sids:
                 if sid not in merged_sids:
@@ -942,10 +1051,15 @@ def coalesce_adjacent_sub_units(
             prev["sentence_ids"] = merged_sids
             prev["t_last"] = float(unit["t_last"])
             prev["next_sentence_start"] = unit.get("next_sentence_start")
+            prev["trimmed_tail"] = bool(unit.get("trimmed_tail", False))
             prev_text = (prev.get("transcript") or "").strip()
             curr_text = (unit.get("transcript") or "").strip()
             if curr_text and curr_text not in prev_text:
                 prev["transcript"] = f"{prev_text} {curr_text}".strip()
+            prev_w_text = (prev.get("whisper_transcript") or "").strip()
+            curr_w_text = (unit.get("whisper_transcript") or "").strip()
+            if curr_w_text and curr_w_text not in prev_w_text:
+                prev["whisper_transcript"] = f"{prev_w_text} {curr_w_text}".strip()
         else:
             coalesced.append(dict(unit))
 

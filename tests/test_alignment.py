@@ -210,5 +210,77 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         finally:
             tmp_path.unlink(missing_ok=True)
 
+    def test_tc04_short_transcript_trimming_locks_exact_rightmost_word_bounds(self):
+        """TC-04: Verify 1-to-2 char transcripts like '4%' are not rejected by a 3-char floor and lock to the final token."""
+        words = [
+            {"word": "4%", "start": 250.0, "end": 250.5},
+            {"word": "呃", "start": 251.0, "end": 252.0},
+            {"word": "對不起重來", "start": 252.2, "end": 255.0},
+            {"word": "4%", "start": 257.4, "end": 258.0},
+        ]
+        s_short = _sentence(38, 250.0, 258.0, "4% 呃 對不起重來 4%", words)
+        clip = {
+            "sentence_ids": [38],
+            "start_sentence_id": 38,
+            "end_sentence_id": 38,
+            "transcript": "4%",
+            "topic": "Short Figure",
+        }
+        sub_units = resolve_clip_sub_units([s_short], clip, total_dur=300.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(257.4, abs=0.02)
+        assert sub_units[0]["t_last"] == pytest.approx(258.0, abs=0.02)
+        assert sub_units[0]["trimmed_head"] is True
+
+    def test_tc05_trimmed_boundary_prevents_coalesce_from_resurrecting_stumble(self):
+        """TC-05: Verify coalesce_adjacent_sub_units never merges across a boundary where the LLM trimmed a tail stumble."""
+        words_s6 = [
+            {"word": "完美的監控工具那就是WiFi", "start": 39.16, "end": 47.10},
+            {"word": "你大概也聽過細微摔", "start": 47.20, "end": 51.60},
+        ]
+        words_s7 = [
+            {"word": "對就是你家路由器發出的訊號", "start": 47.25, "end": 55.00},
+        ]
+        s6 = _sentence(6, 39.16, 51.60, "完美的監控工具那就是WiFi你大概也聽過細微摔", words_s6)
+        s7 = _sentence(7, 47.25, 55.00, "對就是你家路由器發出的訊號", words_s7)
+
+        clip1 = {"sentence_ids": [6], "transcript": "完美的監控工具那就是WiFi", "topic": "Part 1"}
+        clip2 = {"sentence_ids": [7], "transcript": "對就是你家路由器發出的訊號", "topic": "Part 2"}
+
+        su1 = resolve_clip_sub_units([s6, s7], clip1, total_dur=60.0)
+        su2 = resolve_clip_sub_units([s6, s7], clip2, total_dur=60.0)
+        assert su1[0]["trimmed_tail"] is True
+        assert su1[0]["t_last"] == pytest.approx(47.10, abs=0.02)
+
+        # Even though Sentence 6 and 7 are contiguous IDs and gap (47.25 - 47.10 = 0.15s) < 0.40s,
+        # coalesce_adjacent_sub_units must NOT merge them because su1.trimmed_tail is True.
+        coalesced = coalesce_adjacent_sub_units(su1 + su2, max_internal_gap=0.40)
+        assert len(coalesced) == 2
+        assert coalesced[0]["t_last"] == pytest.approx(47.10, abs=0.02)
+        assert coalesced[1]["t_first"] == pytest.approx(47.25, abs=0.02)
+
+    def test_intra_sentence_repeat_trims_to_rightmost_repetition_and_keeps_gemini_transcript(self):
+        """Verify A + A + B intra-sentence repeat trims to the second A + B and preserves Gemini's corrected transcript."""
+        words = [
+            {"word": "研究者推測", "start": 100.0, "end": 101.5},
+            {"word": "BFI本來就是壓縮", "start": 101.5, "end": 103.8},
+            {"word": "研究者推測", "start": 104.0, "end": 105.5},
+            {"word": "BFI本來就是壓縮", "start": 105.5, "end": 107.8},
+            {"word": "後的資訊", "start": 107.8, "end": 109.5},
+        ]
+        s15 = _sentence(15, 100.0, 109.5, "研究者推測BFI本來就是壓縮研究者推測BFI本來就是壓縮後的資訊", words)
+        clip = {
+            "sentence_ids": [15],
+            "transcript": "研究者推測，BFI 本來就是壓縮後的資訊。",
+            "topic": "BFI Explanation",
+        }
+        sub_units = resolve_clip_sub_units([s15], clip, total_dur=120.0)
+        assert len(sub_units) == 1
+        assert sub_units[0]["t_first"] == pytest.approx(104.0, abs=0.02)
+        assert sub_units[0]["t_last"] == pytest.approx(109.5, abs=0.02)
+        assert sub_units[0]["transcript"] == "研究者推測，BFI 本來就是壓縮後的資訊。"
+        assert sub_units[0]["whisper_transcript"] == "研究者推測BFI本來就是壓縮後的資訊"
+
+
 
 

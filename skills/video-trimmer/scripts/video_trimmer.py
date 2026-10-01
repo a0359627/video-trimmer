@@ -382,6 +382,9 @@ def _run(args):
                 "prev_sentence_end": su["prev_sentence_end"],
                 "next_sentence_start": su["next_sentence_start"],
                 "transcript": su["transcript"],
+                "whisper_transcript": su.get("whisper_transcript", su["transcript"]),
+                "trimmed_head": su.get("trimmed_head", False),
+                "trimmed_tail": su.get("trimmed_tail", False),
             })
 
     # Coalesce adjacent continuous sub-units across clip boundaries when gap < 0.40s and no ID is skipped
@@ -418,6 +421,7 @@ def _run(args):
             "in_margin": in_m,
             "out_margin": out_m,
             "transcript": transcript,
+            "whisper_transcript": su.get("whisper_transcript", transcript),
             "take_selection_reason": c.get("take_selection_reason", ""),
             "visual_check": c.get("visual_check", "眼神直視鏡頭就緒，無眨眼閉眼"),
             "audio_check": c.get("audio_check", f"Whisper精準錨定 (In前置氣息={in_m:.2f}s, Out俐落收口={out_m:.2f}s)")
