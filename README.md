@@ -22,16 +22,16 @@
    - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`) across micro-pauses (`gap < 0.25 s`).
    - Enforces a strict **Zero Python String-Similarity Rule**: Python never guesses semantic retakes via character overlap; semantic arbitration belongs exclusively to the LLM.
 2. **Layer 2 — Dual-Mode LLM Take Arbitration & Surgical Micro-Window Repair (`gemini_client.py` / `edl_auditor.py`)**:
-   - **Mode A: Monotonic Script-Anchored Alignment (`--script`)**: Parses the reference script with a Single Source of Truth (SSOT) parser (`extract_script_blocks`) that strips YAML frontmatter, stage directions, and non-spoken metadata headers (`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：`). Formats spoken lines into `[Script Block 01] .. [Script Block NN]` with 100% numbering parity between the Gemini prompt and the EDL auditor, and retains at most one final complete take per block (`Last-Take-Wins`).
-   - **Mode B: Unscripted Intent-Window Arbitration (No `--script`)**: Groups consecutive clauses into semantic intent windows, prunes abandoned fragments and false starts, and preserves intentional rhetorical repetition (e.g., three-part emphasis).
-   - **Surgical Micro-Window Repair & Subsequence Coverage (`edl_auditor.py`)**: Evaluates Mode A coverage with `len(block_norm)` as the sole denominator (`_script_block_coverage_score`) to tolerate minor ASR homophone differences while rejecting short aborted NG fragments. Clusters unselected candidate sentences by time proximity, re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, and applies `deduplicate_and_sort_clips` (`Last-Take-Wins`).
+   - **Mode A: Monotonic Script-Anchored Alignment (When a Shooting Script is Provided)**: Parses the reference script with a Single Source of Truth (SSOT) parser (`extract_script_blocks`) that strips YAML frontmatter, stage directions, and non-spoken metadata headers (`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：`). Formats spoken lines into `[Script Block 01] .. [Script Block NN]` with 100% numbering parity between the Gemini prompt and the EDL auditor, and retains at most one final complete take per block (`Last-Take-Wins`).
+   - **Mode B: Unscripted Intent-Window Arbitration (When No Script is Provided)**: Groups consecutive clauses into semantic intent windows, prunes abandoned fragments and false starts, and preserves intentional rhetorical repetition (e.g., three-part emphasis).
+   - **Surgical Micro-Window Repair & Multimodal Retake Arbitration (`edl_auditor.py`)**: Evaluates Mode A coverage with `len(block_norm)` as the sole denominator (`_script_block_coverage_score`). Detects missing script blocks, unanchored clips, cross-clip tail-to-head retakes (`TAIL_HEAD_RETAKE`), intra-clip repeated takes (`INTRA_CLIP_REPEAT`), and multi-take collisions (`SCRIPT_TAKE_COLLISION`), re-scans only the affected `15 s–90 s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, and applies `Last-Take-Wins` deduplication.
 3. **Layer 3 — Sub-Unit Expansion & Transcript Word-Boundary Trimming (`resolve_clip_sub_units`)**:
    - Expands multi-sentence spans into individual `Sentence ID` sub-units so dropped NG sentences inside a time window are excluded.
-   - Aligns `t_first` and `t_last` to the exact Whisper word boundaries of `clip_data["transcript"]` (`_trim_matched_words_by_transcript`) when the LLM trims a boundary stumble.
+   - Aligns `t_first` and `t_last` to the exact Whisper word boundaries of `clip_data["transcript"]` (`_trim_matched_words_by_transcript`, using rightmost subsequence anchoring and short-token alignment) when the LLM trims a boundary stumble.
 4. **Layer 4 — Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`)**:
-   - Merges consecutive `Sentence ID`s across adjacent EDL clips when the physical inter-word gap is `< 0.40 s` and no `Sentence ID` was skipped, eliminating artificial internal jump-cuts and redundant micro-fades inside continuous sentences.
-5. **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Quality Audit (`edl_auditor.py`)**:
-   - Enforces strict chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), prunes nested/contained redundant clips, guarantees `source_out >= t_last` (plosive tail floor), merges `< 0.45 s` flash-frame micro-clips, and generates an 8-dimension rough-cut audit report (`_edl_report.md` and `_edl_report.json`) with a top-level `agent_verdict` quality gate.
+   - Merges consecutive `Sentence ID`s across adjacent EDL clips when the physical inter-word gap is `< 0.40 s`, no `Sentence ID` was skipped, and neither boundary was trimmed for a retake, eliminating artificial internal jump-cuts and redundant micro-fades inside continuous sentences.
+5. **Layer 5 — Deterministic Timeline Sanitization & 8-Dimension Dual-Track Quality Audit (`edl_auditor.py`)**:
+   - Enforces strict chronological monotonicity (`source_in < source_out` and `c[i].source_out <= c[i+1].source_in`), prunes nested/contained redundant clips, guarantees `source_out >= t_last` (plosive tail floor), merges `< 0.45 s` flash-frame micro-clips, and generates an 8-dimension dual-track (Whisper + Gemini) rough-cut audit report (`_edl_report.md` and `_edl_report.json`) with a top-level `agent_verdict` quality gate.
 6. **Acoustic Onset Snapping & Plosive Tail Defense (`acoustic.py`)**:
    - Places cut-in points 80 ms before vocal cord vibration and dynamically calculates lead-in/lead-out margins from presenter Characters Per Second (CPS) while enforcing `true_speech_end >= t_last`.
 7. **15 ms Audio Equal-Power Micro-Crossfade & Keyframe Hardware Rendering (`render.py`)**:
@@ -50,7 +50,7 @@ video-trimmer/
 │   └── AGENTS.md                            # Packaged client execution invariants (read-only & fail-fast)
 ├── skills/
 │   └── video-trimmer/                       # Canonical Skill Bundle (Single Source of Truth)
-│       ├── SKILL.md                         # Agent Skill specification and operational manual
+│       ├── SKILL.md                         # Agent Skill specification & CLI options reference for AI agents
 │       ├── scripts/                         # Canonical core engine modules (SSOT)
 │       │   ├── __init__.py
 │       │   ├── video_trimmer.py             # CLI parser and 5-layer pipeline orchestrator
@@ -72,7 +72,7 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (95 tests)
+└── tests/                                   # Offline unit test suite (101 tests)
 ```
 
 ---
@@ -91,11 +91,10 @@ brew install ffmpeg
 sudo apt update && sudo apt install -y ffmpeg
 ```
 
-### 2. Install as an Antigravity Plugin or Local CLI
+### 2. Install as an Antigravity Plugin
 
-#### Option A: Install as an Antigravity Plugin (Recommended)
 ```bash
-# Global Plugin
+# Global Plugin (Recommended)
 git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins/video-trimmer
 
 # Or Workspace Plugin
@@ -103,15 +102,10 @@ git clone https://github.com/sylphlin/video-trimmer.git .agents/plugins/video-tr
 
 # Legacy Single-Skill Installation (~/.gemini/config/skills/)
 ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
-```
 
-#### Option B: Install Standalone Python CLI
-```bash
-git clone https://github.com/sylphlin/video-trimmer.git
-cd video-trimmer
-pip install -r requirements.txt
+# Install Python Dependencies and Apple Silicon Metal Acceleration
+pip install -r ~/.gemini/config/plugins/video-trimmer/requirements.txt
 pip install mlx-whisper
-pip install -e .
 ```
 
 ### 3. Provision Google Cloud Resources (`./setup.sh`)
@@ -123,82 +117,86 @@ Run `setup.sh` to configure Vertex AI, Cloud Storage, and Application Default Cr
 gcloud auth application-default login
 
 # Provision GCS bucket, CORS, two-tier lifecycle rules (raw: 2d, deliverables: 15d), IAM, and .env
+cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
 
 ---
 
-## Command-Line Usage
+## Antigravity Usage & Scenarios
 
-```bash
-# Mode B: Unscripted rough-cut (outputs isolated in <input_dir>/output/ by default)
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
+You can operate **Video Trimmer** in Antigravity using two interaction modes:
 
-# Mode A: Script-Anchored rough-cut (Monotonic [Script Block NN] alignment)
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
+1. **Concise `/skill` + `@file` Invocation (Recommended)**: Type `/video-trimmer` to select the plugin and tag your files with `@`. Specify only the key parameters (for example, `Video: @XX, Script: @YY`) without writing full sentences.
+2. **Natural Language Prompt (Auto-Routed)**: Describe your editing goal in plain conversational language. Antigravity automatically selects and runs this plugin.
 
-# Apply compact pacing for fast-paced tutorials
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast"
+By default, all generated deliverables are isolated in the `output/` subdirectory next to the input video (`./output/` for Google Drive links).
 
-# Enable Agentic Video Understanding mode when explicitly requested
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+### Scenario 1: Script-Guided Recording Rough-Cut (Mode A: Monotonic Script-Anchored Alignment)
+Use this scenario when you have a shooting script or outline. The agent strips non-spoken metadata headers, aligns every spoken block in order, and keeps the final complete take for each block.
 
-# Re-render locally from a cached EDL JSON without re-running Gemini inference
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "output/raw_footage_static_edl.json"
-```
+- **Concise `/ + @` Command**:
+  ```text
+  /video-trimmer Video: @raw_footage.mp4, Script: @shooting_script.md
+  ```
+- **Natural Language Prompt**:
+  ```text
+  Trim @raw_footage.mp4 using @shooting_script.md as the reference script, and remove all stutters and retakes.
+  ```
 
----
+### Scenario 2: Unscripted Talking-Head, Interview, or Vlog Rough-Cut (Mode B: Unscripted Intent-Window Arbitration)
+Use this scenario for free-form recordings without a script. The agent removes false starts, stutters, and dead air while preserving intentional rhetorical repetition.
 
-## CLI Options Reference
+- **Concise `/ + @` Command**:
+  ```text
+  /video-trimmer Video: @raw_footage.mp4
+  ```
+- **Natural Language Prompt**:
+  ```text
+  Clean up @raw_footage.mp4 by removing bad takes, stutters, and dead air, and export the NLE timelines and rough-cut MP4.
+  ```
 
-| Option | Short Flag | Default | Description |
-| :--- | :---: | :---: | :--- |
-| `--input` | `-i` | *(Required)* | Input video file path (`.mp4`, `.mov`), Google Drive URL, or `gs://` URI |
-| `--output-dir` | `-o` | `<input_dir>/output/` | Output directory for generated timelines and rendered video (`./output/` for Google Drive URLs) |
-| `--model` | `-m` | `gemini-3.8-flash` | Vertex AI model identifier (`MODEL_NAME`) |
-| `--project` | | `None` | Google Cloud Project ID (`GOOGLE_CLOUD_PROJECT`) |
-| `--region` | | `global` | Vertex AI location (`GOOGLE_CLOUD_LOCATION`) |
-| `--bucket` | | `None` | GCS staging bucket (`VIDEO_TRIMMER_BUCKET`) |
-| `--keep-gcs-upload` | | `False` | Retain staged video in `gs://<bucket>/raw/` after inference |
-| `--script` | `-s` | `None` | Shooting script file path (`shooting_script.md` or `.txt`) to enable Mode A |
-| `--agentic` | | `False` | Enable Agentic Video Understanding mode (default is Static Multimodal) |
-| `--pacing` | `-p` | `auto` | Pacing mode: `auto` (adaptive CPS), `compact`, or `breathing` |
-| `--cached-json` | | `None` | Existing EDL JSON path to skip cloud inference |
-| `--suffix` | | `None` | Custom filename suffix tag |
-| `--crf` | | `18` | FFmpeg H.264 quality factor (`18` is visually lossless) |
-| `--skip-whisper` | | `False` | Skip Whisper transcription and use energy-only onset detection |
-| `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False` |
-| `--verbose` | | `False` | Enable debug logging |
+### Scenario 3: Fast-Paced Tutorial or Explainer Rough-Cut (Compact Pacing)
+Use this scenario for high-density tutorials where tighter inter-sentence pauses are desired.
+
+- **Concise `/ + @` Command**:
+  ```text
+  /video-trimmer Video: @raw_footage.mp4, Script: @shooting_script.md, Pacing: compact
+  ```
+- **Natural Language Prompt**:
+  ```text
+  Rough-cut @raw_footage.mp4 with compact pacing against @shooting_script.md.
+  ```
+
+### Scenario 4: Direct Rough-Cut from a Google Drive Share Link
+Pass a Google Drive URL directly without manually downloading large video files first.
+
+- **Concise `/ + @` Command**:
+  ```text
+  /video-trimmer Video: https://drive.google.com/file/d/YOUR_FILE_ID/view, Script: @shooting_script.md
+  ```
+- **Natural Language Prompt**:
+  ```text
+  Download this Google Drive video and rough-cut it against @shooting_script.md: https://drive.google.com/file/d/YOUR_FILE_ID/view
+  ```
 
 ---
 
 ## Generated Deliverables
 
-For an input video `raw_footage.mp4`, the tool automatically creates an `output/` subdirectory next to the source video (or uses the folder passed to `-o`) and generates:
+For an input video `raw_footage.mp4`, the agent automatically creates an `output/` subdirectory next to the source video and delivers:
 
 1. **`output/raw_footage_<tag>_trimmed.mp4`**: Rendered rough-cut video with 15 ms equal-power audio crossfades.
 2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** and **DaVinci Resolve**.
 3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML timeline for **Final Cut Pro**.
-4. **`output/raw_footage_<tag>_edl.json`**: Structured cut list with `agent_verdict`, selected sentences, CPS values, and timestamps.
-5. **`output/raw_footage_<tag>_edl.csv`**: Spreadsheet cut table with editorial notes.
-6. **`output/raw_footage_<tag>_edl_report.md`**: 8-dimension human-readable rough-cut quality audit report.
-7. **`output/raw_footage_<tag>_edl_report.json`**: Machine-readable audit report with top-level `agent_verdict`.
-8. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
+4. **`output/raw_footage_<tag>_edl.edl`** & **`_edl.csv`**: CMX 3600 EDL and spreadsheet cut table with editorial notes.
+5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with top-level `agent_verdict`.
+6. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
 
 ---
 
-## Google Drive Direct Links & Two-Tier GCS Lifecycle Policy
-
-### 1. Supported Google Drive Scenarios (`drive.readonly` ADC)
-
-| Scenario | Input Flag Syntax | Automated Behavior |
-| :--- | :--- | :--- |
-| **Scenario A: Google Drive Video Rough-Cut** | `-i "https://drive.google.com/file/d/FILE_ID/view"` | Verifies remote `md5Checksum`, recovers UTF-8 CJK filenames, caches in `gdrive_inputs/`, runs local Whisper word-level timing, and stages to GCS `raw/`. |
-| **Scenario B: Script-Guided Cloud Rough-Cut** | `-i "https://drive.google.com/file/d/FILE_ID/view" -s shooting_script.md` | Aligns takes monotonically against `[Script Block NN]`, keeps the final valid take, coalesces continuous sub-units, and exports `.mp4`, `.xml`, and `.fcpxml`. |
-| **Scenario C: Direct GCS URI Input** | `-i "gs://video-preprocessing-PROJECT_ID/raw/raw_footage.mp4"` | References the existing GCS object in Vertex AI without re-uploading. |
-
-### 2. Two-Tier GCS Bucket Lifecycle Policy (`gs://video-preprocessing-${PROJECT_ID}`)
+## Two-Tier GCS Bucket Lifecycle Policy (`gs://video-preprocessing-${PROJECT_ID}`)
 
 | GCS Prefix (`matchesPrefix`) | Stored Objects | Retention (`age`) | Purpose |
 | :--- | :--- | :--- | :--- |
@@ -209,7 +207,7 @@ For an input video `raw_footage.mp4`, the tool automatically creates an `output/
 
 ## Unit Testing
 
-Run the offline test suite (95 tests) before committing changes:
+Run the offline test suite (101 tests) before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

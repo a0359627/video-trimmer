@@ -21,16 +21,16 @@
    - 透過 Whisper 提取逐字時間戳，僅依據物理邊界切分 `Sentence ID`：換氣停頓（`gap >= 0.20s`）、吃螺絲拉長音起音（`word_dur >= 1.20s` 且單字元 `>= 0.45s`）、句尾標點與說話者輪替，同時保留微停頓（`gap < 0.25s`）下的連詞黏合（`CONJUNCTIONS`）。
    - **零 Python 語意猜測原則**：絕不在 Python 端使用字串相似度猜測 NG 重講，語意判斷 100% 交由 LLM 處理。
 2. **第二層：雙模式 LLM 語意擇優與局部微視窗精準重掃 (`gemini_client.py` / `edl_auditor.py`)**：
-   - **Mode A：有講稿單調錨定模式（傳入 `--script`）**：採用單一真相來源（SSOT）講稿解析器（`extract_script_blocks`），自動過濾 YAML Frontmatter、鏡位指示與非口播屬性欄位（如 `標題：`、`主題：`、`大綱：`、`內文：`、`Title:`、`Subject:`、`Outline:`），將實際口播台詞切分為 `[Script Block 01] .. [Script Block NN]`，確保 Gemini 提示詞與審計器編號 100% 一致，並針對每個講稿段落最多保留最後一次完整成功的 Take（`Last-Take-Wins`）。
-   - **Mode B：無講稿意圖視窗仲裁模式（未傳 `--script`）**：以局部語意視窗識別「未完成殘句重講（Abandoned Fragment）」並予以剔除，同時保護「刻意修辭排比強調（如：請訂閱、請訂閱、請訂閱）」不被誤刪。
-   - **局部小視窗精準重掃與子序列覆蓋率評估（`edl_auditor.py`）**：以完整講稿段落長度 `len(block_norm)` 為唯一分母計算分段覆蓋率（`_script_block_coverage_score`），容許 Whisper 同音字微幅差異並排除短 NG 殘句誤判；若偵測到遺漏段落、未錨定片段或相鄰疑似重講，將候選句依時間距離聚類後，僅針對該 `15s–90s` 局部視訊區間透過 `VideoMetadata(start_offset=..., end_offset=...)` 發起單次重掃，並執行 `deduplicate_and_sort_clips`（`Last-Take-Wins` 去重）。
+   - **Mode A：有講稿單調錨定模式（提供拍攝講稿時）**：採用單一真相來源（SSOT）講稿解析器（`extract_script_blocks`），自動過濾 YAML Frontmatter、鏡位指示與非口播屬性欄位（如 `標題：`、`主題：`、`大綱：`、`內文：`、`Title:`、`Subject:`、`Outline:`），將實際口播台詞切分為 `[Script Block 01] .. [Script Block NN]`，確保 Gemini 提示詞與審計器編號 100% 一致，並針對每個講稿段落最多保留最後一次完整成功的 Take（`Last-Take-Wins`）。
+   - **Mode B：無講稿意圖視窗仲裁模式（未提供講稿時）**：以局部語意視窗識別「未完成殘句重講（Abandoned Fragment）」並予以剔除，同時保護「刻意修辭排比強調（如：請訂閱、請訂閱、請訂閱）」不被誤刪。
+   - **局部小視窗精準重掃與多模態重錄仲裁（`edl_auditor.py`）**：以完整講稿段落長度 `len(block_norm)` 為唯一分母計算分段覆蓋率（`_script_block_coverage_score`）；若偵測到遺漏段落、未錨定片段、跨片段句尾重講（`TAIL_HEAD_RETAKE`）、單一片段內部重複（`INTRA_CLIP_REPEAT`）或同段多 Take 衝突（`SCRIPT_TAKE_COLLISION`），僅針對該 `15s–90s` 局部視訊區間透過 `VideoMetadata(start_offset=..., end_offset=...)` 發起單次重掃，並執行 `Last-Take-Wins` 去重。
 3. **第三層：子句展開與逐字稿邊界精修 (`resolve_clip_sub_units`)**：
    - 將多句跨度自動展開為獨立的 `Sentence ID` 子單元，自動略過時間區間內未被選中的 NG 句。
-   - 當 LLM 在 `transcript` 欄位修剪了句首或句尾贅字時，透過 `_trim_matched_words_by_transcript` 自動將 `t_first` 與 `t_last` 對齊至實際保留字詞的 Whisper 邊界。
+   - 當 LLM 在 `transcript` 欄位修剪了句首吃螺絲或句尾殘句時，透過 `_trim_matched_words_by_transcript`（最右側子序列錨定與短詞對齊）自動將 `t_first` 與 `t_last` 對齊至實際保留字詞的 Whisper 邊界。
 4. **第四層：跨片段連貫小句無縫合一 (`coalesce_adjacent_sub_units`)**：
-   - 當相鄰片段為連續 `Sentence ID`（中間未跳過任何 NG 句）且物理字間距 `< 0.40s` 時，自動合併為單一連續片段，消除長句內部的無謂跳接（Jump-Cut）與多餘微淡化。
-5. **第五層：物理時間軸確定性自癒與 8 維度品質審計 (`edl_auditor.py`)**：
-   - 強制依時間軸單調遞增排序（`source_in < source_out` 且 `c[i].source_out <= c[i+1].source_in`）、自動剔除被包裹的冗餘子片段、消解相鄰邊界微重疊、強制保底 `source_out >= t_last`（保護字尾塞音）、自動縫合 `< 0.45s` 閃幀微碎切，並同步輸出 `<base>_<tag>_edl_report.md` 與含頂層 `agent_verdict` 品質閘門的 `<base>_<tag>_edl_report.json`。
+   - 當相鄰片段為連續 `Sentence ID`（中間未跳過任何 NG 句、且邊界未經過口誤修剪）且物理字間距 `< 0.40s` 時，自動合併為單一連續片段，消除長句內部的無謂跳接（Jump-Cut）與多餘微淡化。
+5. **第五層：物理時間軸確定性自癒與 8 維度雙軌品質審計 (`edl_auditor.py`)**：
+   - 強制依時間軸單調遞增排序（`source_in < source_out` 且 `c[i].source_out <= c[i+1].source_in`）、自動剔除被包裹的冗餘子片段、消解相鄰邊界微重疊、強制保底 `source_out >= t_last`（保護字尾塞音）、自動縫合 `< 0.45s` 閃幀微碎切，並結合 Whisper 與 Gemini 雙軌文字比對輸出 `<base>_<tag>_edl_report.md` 與含頂層 `agent_verdict` 品質閘門的 `<base>_<tag>_edl_report.json`。
 6. **聲學起音鎖定與字尾塞音保護 (`acoustic.py`)**：
    - 將剪輯入點鎖定於聲帶發聲前 80 ms，並依據講者語速（CPS）動態計算緩衝邊界，強制 `true_speech_end >= t_last` 以保護字尾無聲除阻音與鼻音。
 7. **15 ms 等功率音訊微淡化與關鍵幀硬體加速渲染 (`render.py`)**：
@@ -49,7 +49,7 @@ video-trimmer/
 │   └── AGENTS.md                            # 打包於 Plugin 內的客戶端執行期守則（唯讀與 Fail-Fast）
 ├── skills/
 │   └── video-trimmer/                       # 標準技能套件主幹（Single Source of Truth）
-│       ├── SKILL.md                         # 技能規範與自動化執行手冊
+│       ├── SKILL.md                         # 技能規範與 Agent 專用 CLI 參數參考手冊
 │       ├── scripts/                         # 核心引擎模組實體目錄 (SSOT)
 │       │   ├── __init__.py
 │       │   ├── video_trimmer.py             # CLI 解析與五層管線協調器
@@ -64,7 +64,7 @@ video-trimmer/
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
-└── tests/                                   # 離線單元測試套件（95 項測試）
+└── tests/                                   # 離線單元測試套件（101 項測試）
 ```
 
 ---
@@ -81,7 +81,7 @@ brew install ffmpeg
 sudo apt update && sudo apt install -y ffmpeg
 ```
 
-### 2. 安裝為 Antigravity Plugin 或本地 CLI
+### 2. 安裝為 Antigravity Plugin
 
 ```bash
 # 全域 Antigravity Plugin（建議）
@@ -91,7 +91,7 @@ git clone https://github.com/sylphlin/video-trimmer.git ~/.gemini/config/plugins
 ln -s ~/.gemini/config/plugins/video-trimmer/skills/video-trimmer ~/.gemini/config/skills/video-trimmer
 
 # 安裝 Python 相依套件與 Apple Silicon Metal 加速
-pip install -r requirements.txt
+pip install -r ~/.gemini/config/plugins/video-trimmer/requirements.txt
 pip install mlx-whisper
 ```
 
@@ -99,32 +99,81 @@ pip install mlx-whisper
 
 ```bash
 gcloud auth application-default login
+cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
 
 ---
 
-## 命令列使用說明 (CLI Usage)
+## Antigravity 操作方式與使用情境 (Usage & Scenarios)
 
-預設情況下，所有產出檔案（`_trimmed.mp4`、`.xml`、`.fcpxml`、`.json`、`.csv`、`_edl_report.md`、`_edl_report.json` 與 `_whisper_raw.json`）皆會自動隔離儲存於原始影片目錄下的 `output/` 子目錄（Google Drive 連結則為 `./output/`），亦可使用 `-o` 指定自訂輸出目錄：
+在 Antigravity 中，您可以透過以下兩種方式操作 **Video Trimmer**：
 
-```bash
-# Mode B：無講稿自動粗剪（預設採用 Static Multimodal 快速模式，產出物自動存於 <input_dir>/output/）
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4"
+1. **極簡指令（`/` 指定技能 + `@` 標記檔案，推薦）**：輸入 `/video-trimmer` 選取技能，並用 `@` 標記影片與講稿檔案，僅需列出關鍵欄位（如 `影片: @XX, 講稿: @YY`），無須撰寫完整句子。
+2. **口語表達（自然語言自動觸發）**：直接用日常口語描述剪輯需求，Antigravity 會自動識別意圖並呼叫此 Plugin。
 
-# Mode A：搭配拍攝腳本單調錨定對齊（推薦有講稿拍攝使用）
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md"
+所有產出檔案（`_trimmed.mp4`、`.xml`、`.fcpxml`、`.edl`、`.csv`、`_edl_report.md` 與 `_edl_report.json`）預設皆會自動隔離儲存於原始影片目錄下的 `output/` 子目錄（Google Drive 連結則為 `./output/`）。
 
-# 採用緊湊節奏模式（適用於快節奏教學影片）
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "sample_take.mp4" --pacing compact --suffix "fast"
+### 情境 1：有講稿 / 大綱的錄影粗剪（Mode A：講稿錨定對齊）
+適用於已備妥拍攝腳本或口播大綱的錄影，系統會自動過濾腳本內的非口播標題，依序對齊每個段落並保留最後一次完整成功的 Take。
 
-# 明確啟用 Agentic 動態影格探索模式
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --script "shooting_script.md" --agentic
+- **極簡指令**：
+  ```text
+  /video-trimmer 影片: @raw_footage.mp4, 講稿: @shooting_script.md
+  ```
+- **口語表達**：
+  ```text
+  幫我照著 @shooting_script.md 修剪 @raw_footage.mp4，剪掉吃螺絲和重錄片段。
+  ```
 
-# 使用已快取的 EDL JSON 本地快速重算與渲染
-python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw_footage.mp4" --cached-json "output/raw_footage_static_edl.json"
-```
+### 情境 2：無講稿的即興口播、訪談或 Vlog 粗剪（Mode B：無稿智慧去重）
+適用於無腳本的自由發揮錄影，系統會自動剔除說到一半放棄重講的殘句與空白停頓，同時保留刻意排比強調的語句。
+
+- **極簡指令**：
+  ```text
+  /video-trimmer 影片: @raw_footage.mp4
+  ```
+- **口語表達**：
+  ```text
+  請幫我把 @raw_footage.mp4 裡面的口誤、卡詞跟重複開頭剪掉，匯出剪輯時間軸與粗剪影片。
+  ```
+
+### 情境 3：快節奏教學或短影音粗剪（緊湊節奏模式）
+適用於需要縮短句間換氣停頓的高密度教學或解說影片。
+
+- **極簡指令**：
+  ```text
+  /video-trimmer 影片: @raw_footage.mp4, 講稿: @shooting_script.md, 節奏: 緊湊
+  ```
+- **口語表達**：
+  ```text
+  請用緊湊節奏幫我粗剪 @raw_footage.mp4，並對照 @shooting_script.md 去除重講片段。
+  ```
+
+### 情境 4：Google Drive 雲端影片直接粗剪
+無須手動下載大檔案，直接提供 Google Drive 分享連結即可自動完成下載快取、聲學對齊與雲端粗剪。
+
+- **極簡指令**：
+  ```text
+  /video-trimmer 影片: https://drive.google.com/file/d/YOUR_FILE_ID/view, 講稿: @shooting_script.md
+  ```
+- **口語表達**：
+  ```text
+  幫我下載這個 Google Drive 連結的影片並對照 @shooting_script.md 完成粗剪：https://drive.google.com/file/d/YOUR_FILE_ID/view
+  ```
+
+---
+
+## 自動交付成果 (Generated Deliverables)
+
+每次執行完成後，Agent 會在 `output/` 目錄下產出並驗證以下檔案：
+
+1. **`<basename>_<tag>_trimmed.mp4`**：套用 15 ms 等功率音訊微淡化、可直接播放的粗剪成品影片。
+2. **`<basename>_<tag>_edl.xml`**：適用於 **Adobe Premiere Pro** 與 **DaVinci Resolve** 的 Final Cut Pro 7 XML 時間軸。
+3. **`<basename>_<tag>_edl.fcpxml`**：適用於 **Apple Final Cut Pro** 的 FCPXML 時間軸。
+4. **`<basename>_<tag>_edl.edl`** / **`<basename>_<tag>_edl.csv`**：CMX 3600 EDL 與試算表剪輯清單。
+5. **`<basename>_<tag>_edl_report.md`** / **`.json`**：8 維度粗剪品質審計報告與 `agent_verdict` 自動化品質閘門結果。
 
 ---
 
