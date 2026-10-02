@@ -17,6 +17,66 @@
 
 ## 5-Layer Unified Architecture & Core Capabilities
 
+```mermaid
+flowchart TD
+    classDef inputStyle fill:#2D3748,stroke:#4A5568,stroke-width:2px,color:#fff;
+    classDef stage1Style fill:#2B6CB0,stroke:#2C5282,stroke-width:2px,color:#fff;
+    classDef stage2Style fill:#319795,stroke:#285E61,stroke-width:2px,color:#fff;
+    classDef stage3Style fill:#4C51BF,stroke:#3C366B,stroke-width:2px,color:#fff;
+    classDef stage4Style fill:#6B46C1,stroke:#553C9A,stroke-width:2px,color:#fff;
+    classDef artifactStyle fill:#D69E2E,stroke:#B7791F,stroke-width:2px,color:#fff;
+    classDef outputStyle fill:#276749,stroke:#1C4532,stroke-width:2px,color:#fff;
+
+    subgraph Inputs["Input Media & Reference Script"]
+        IN["Raw Video Footage<br/>(Local File or Google Drive Link)"]:::inputStyle
+        SC["Optional Shooting Script<br/>(shooting_script.md)"]:::inputStyle
+    end
+
+    subgraph L1["Layer 1: Pure Acoustic & Punctuation Segmentation (transcribe.py)"]
+        W_ASR["Whisper Word-Level ASR<br/>(mlx-whisper / faster-whisper, word_timestamps=True)"]:::stage1Style
+        S_SEG["Physical Boundary Sentence ID Split<br/>(Breath Pause >=0.20s, Stretched Onset, Punctuation & Conjunctions)"]:::stage1Style
+        W_JSON["Artifact: <basename>_whisper_raw.json<br/>(Acoustic Ground Truth & Sentence Index)"]:::artifactStyle
+        W_ASR --> S_SEG --> W_JSON
+    end
+
+    subgraph L2["Layer 2: Dual-Mode LLM Arbitration & Micro-Window Repair (gemini_client / edl_auditor)"]
+        MODE["Vertex AI Gemini 3.8 Flash Multimodal Video Scan<br/>• Mode A: Script-Anchored Alignment [Script Block 01..NN]<br/>• Mode B: Unscripted Intent-Window Arbitration"]:::stage2Style
+        REPAIR["Dual-Track Retake Detection & 15s-90s Surgical Video Rescan<br/>(TAIL_HEAD_RETAKE / INTRA_CLIP_REPEAT + Last-Take-Wins)"]:::stage2Style
+        MODE --> REPAIR
+    end
+
+    subgraph L3_L4["Layer 3 & 4: Word-Boundary Trimming, Coalescing & Acoustic Snapping"]
+        L3["Layer 3: Sub-Unit Expansion & Word-Boundary Trimming<br/>(resolve_clip_sub_units + _trim_matched_words_by_transcript)"]:::stage3Style
+        L4["Layer 4: Global Cross-Clip Coalescing<br/>(coalesce_adjacent_sub_units, Merge Continuous IDs with Gap <0.40s)"]:::stage3Style
+        AC["Acoustic Onset Snapping & Plosive Tail Defense<br/>(80ms Pre-Vocal Onset + Dynamic CPS Margin >=t_last)"]:::stage3Style
+        L3 --> L4 --> AC
+    end
+
+    subgraph L5["Layer 5: Deterministic Timeline Sanitization & 8-Dimension Audit (edl_auditor.py)"]
+        SAN["Monotonic Timeline Sanitization<br/>(Prune Nested Clips, Resolve Overlaps, Coalesce <0.45s Micro-Clips)"]:::stage4Style
+        AUD["8-Dimension Dual-Track Quality Audit & agent_verdict Gate<br/>(Whisper + Gemini Retake Check, Script Coverage & Pacing)"]:::stage4Style
+        SAN --> AUD
+    end
+
+    subgraph Deliverables["Final Deliverables (<input_dir>/output/)"]
+        OUT_MP4["Deliverable: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox Hardware Render + 15ms Equal-Power Micro-Fade)"]:::outputStyle
+        OUT_NLE["Deliverable: Multi-NLE Project Timelines<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_REP["Deliverable: 8-Dimension Quality Audit Reports<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
+    end
+
+    IN --> W_ASR
+    IN --> MODE
+    SC -.-> MODE
+    W_JSON --> MODE
+    SC -.-> REPAIR
+    REPAIR --> L3
+    W_JSON --> L3
+    AC --> SAN
+    AUD --> OUT_MP4
+    AUD --> OUT_NLE
+    AUD --> OUT_REP
+```
+
 1. **Layer 1 — Pure Acoustic & Punctuation Clause Segmentation (`transcribe.py`)**:
    - Extracts phoneme-aligned word timestamps via Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA).
    - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`) across micro-pauses (`gap < 0.25 s`).

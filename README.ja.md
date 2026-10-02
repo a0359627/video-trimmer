@@ -17,6 +17,66 @@
 
 ## 5 レイヤー統合アーキテクチャと主な機能
 
+```mermaid
+flowchart TD
+    classDef inputStyle fill:#2D3748,stroke:#4A5568,stroke-width:2px,color:#fff;
+    classDef stage1Style fill:#2B6CB0,stroke:#2C5282,stroke-width:2px,color:#fff;
+    classDef stage2Style fill:#319795,stroke:#285E61,stroke-width:2px,color:#fff;
+    classDef stage3Style fill:#4C51BF,stroke:#3C366B,stroke-width:2px,color:#fff;
+    classDef stage4Style fill:#6B46C1,stroke:#553C9A,stroke-width:2px,color:#fff;
+    classDef artifactStyle fill:#D69E2E,stroke:#B7791F,stroke-width:2px,color:#fff;
+    classDef outputStyle fill:#276749,stroke:#1C4532,stroke-width:2px,color:#fff;
+
+    subgraph Inputs["入力メディア＆参照台本"]
+        IN["未編集カメラ映像<br/>(ローカルファイルまたは Google Drive リンク)"]:::inputStyle
+        SC["任意撮影台本 / アウトライン<br/>(shooting_script.md)"]:::inputStyle
+    end
+
+    subgraph L1["Layer 1: 純音響・句読点ベースの節分割 (transcribe.py)"]
+        W_ASR["Whisper 単語レベル音響文字起こし<br/>(mlx-whisper / faster-whisper, word_timestamps=True)"]:::stage1Style
+        S_SEG["物理境界による Sentence ID 分割<br/>(息継ぎ >=0.20s、長音化、句読点、接続詞結合)"]:::stage1Style
+        W_JSON["中間アーティファクト: <basename>_whisper_raw.json<br/>(音響グラウンドトゥルース＆文インデックス)"]:::artifactStyle
+        W_ASR --> S_SEG --> W_JSON
+    end
+
+    subgraph L2["Layer 2: デュアルモード LLM 調停＆マイクロウィンドウ再スキャン (gemini_client / edl_auditor)"]
+        MODE["Vertex AI Gemini 3.8 Flash マルチモーダル動画理解<br/>• Mode A: 台本アンカー単調アライメント [Script Block 01..NN]<br/>• Mode B: 台本なしインテントウィンドウ調停"]:::stage2Style
+        REPAIR["デュアルトラック重複検出＆ 15s-90s 局所マイクロウィンドウ再スキャン<br/>(TAIL_HEAD_RETAKE / INTRA_CLIP_REPEAT + Last-Take-Wins)"]:::stage2Style
+        MODE --> REPAIR
+    end
+
+    subgraph L3_L4["Layer 3 & 4: 単語境界トリミング、クリップ間結合＆音響オンセット固定"]
+        L3["Layer 3: サブユニット展開＆単語境界トリミング<br/>(resolve_clip_sub_units + _trim_matched_words_by_transcript)"]:::stage3Style
+        L4["Layer 4: グローバル・クリップ間シームレス結合<br/>(coalesce_adjacent_sub_units, 間隔 <0.40s の連続文を統合)"]:::stage3Style
+        AC["音響オンセット・スナッピング＆語尾閉鎖音保護<br/>(発声 80ms 前スナップ + 動的 CPS マージン >=t_last)"]:::stage3Style
+        L3 --> L4 --> AC
+    end
+
+    subgraph L5["Layer 5: 決定論的タイムライン自己修復＆ 8 次元品質監査 (edl_auditor.py)"]
+        SAN["単調増加タイムライン自己修復<br/>(内包クリップ除去、微小重複解消、<0.45s マイクロクリップ統合)"]:::stage4Style
+        AUD["8 次元デュアルトラック品質監査＆ agent_verdict ゲート<br/>(Whisper + Gemini リテイク検証、台本カバレッジ、ペース監査)"]:::stage4Style
+        SAN --> AUD
+    end
+
+    subgraph Deliverables["最終成果物 (<input_dir>/output/)"]
+        OUT_MP4["成果物: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox ハードウェア高速出力 + 15ms 等パワーマイクロフェード)"]:::outputStyle
+        OUT_NLE["成果物: マルチ NLE プロジェクトタイムライン<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_REP["成果物: 8 次元品質監査レポート<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
+    end
+
+    IN --> W_ASR
+    IN --> MODE
+    SC -.-> MODE
+    W_JSON --> MODE
+    SC -.-> REPAIR
+    REPAIR --> L3
+    W_JSON --> L3
+    AC --> SAN
+    AUD --> OUT_MP4
+    AUD --> OUT_NLE
+    AUD --> OUT_REP
+```
+
 1. **レイヤー 1：純音響・句読点ベースの節分割 (`transcribe.py`)**：
    - 息継ぎ休止（`gap >= 0.20s`）、言い淀みによる長音化（`word_dur >= 1.20s`）、句読点閉鎖、および話者交替の物理境界のみで `Sentence ID` を分割し、微細休止（`gap < 0.25s`）を跨ぐ接続詞結合（`CONJUNCTIONS`）を保持します。Python 側の文字列類似度によるリテイク推測は一切行いません。
 2. **レイヤー 2：デュアルモード LLM テイク選定＆局所マイクロウィンドウ再スキャン (`gemini_client.py` / `edl_auditor.py`)**：

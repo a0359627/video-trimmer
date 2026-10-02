@@ -17,6 +17,66 @@
 
 ## 五層統一剪輯架構與核心技術特點
 
+```mermaid
+flowchart TD
+    classDef inputStyle fill:#2D3748,stroke:#4A5568,stroke-width:2px,color:#fff;
+    classDef stage1Style fill:#2B6CB0,stroke:#2C5282,stroke-width:2px,color:#fff;
+    classDef stage2Style fill:#319795,stroke:#285E61,stroke-width:2px,color:#fff;
+    classDef stage3Style fill:#4C51BF,stroke:#3C366B,stroke-width:2px,color:#fff;
+    classDef stage4Style fill:#6B46C1,stroke:#553C9A,stroke-width:2px,color:#fff;
+    classDef artifactStyle fill:#D69E2E,stroke:#B7791F,stroke-width:2px,color:#fff;
+    classDef outputStyle fill:#276749,stroke:#1C4532,stroke-width:2px,color:#fff;
+
+    subgraph Inputs["輸入原始素材與腳本"]
+        IN["原始單機位影片<br/>(本機路徑或 Google Drive 連結)"]:::inputStyle
+        SC["選用拍攝講稿 / 大綱<br/>(shooting_script.md)"]:::inputStyle
+    end
+
+    subgraph L1["Layer 1: 純聲學與標點子句切分 (transcribe.py)"]
+        W_ASR["Whisper 毫秒級逐字轉錄<br/>(mlx-whisper / faster-whisper, word_timestamps=True)"]:::stage1Style
+        S_SEG["物理邊界 Sentence ID 切分<br/>(換氣停頓 >=0.20s、拉長音、標點與連詞黏合)"]:::stage1Style
+        W_JSON["中繼產物: <basename>_whisper_raw.json<br/>(聲學基準與候選句索引)"]:::artifactStyle
+        W_ASR --> S_SEG --> W_JSON
+    end
+
+    subgraph L2["Layer 2: 雙模式 LLM 語意擇優與局部微視窗重掃 (gemini_client / edl_auditor)"]
+        MODE["Vertex AI Gemini 3.8 Flash 多模態影片理解<br/>• Mode A: 有講稿單調錨定 [Script Block 01..NN]<br/>• Mode B: 無講稿意圖視窗仲裁 (剔除殘句/保護排比)"]:::stage2Style
+        REPAIR["雙軌重講偵測 & 15s-90s 局部視訊微視窗重掃<br/>(TAIL_HEAD_RETAKE / INTRA_CLIP_REPEAT + Last-Take-Wins)"]:::stage2Style
+        MODE --> REPAIR
+    end
+
+    subgraph L3_L4["Layer 3 & 4: 逐字邊界精修、跨片段合一與聲學起音鎖定"]
+        L3["Layer 3: 子句展開與逐字稿邊界精修<br/>(resolve_clip_sub_units + _trim_matched_words_by_transcript)"]:::stage3Style
+        L4["Layer 4: 跨片段連貫小句無縫合一<br/>(coalesce_adjacent_sub_units, 字間距 <0.40s 消除跳接)"]:::stage3Style
+        AC["聲學起音鎖定與字尾塞音保護<br/>(發聲前 80ms 鎖定 + CPS 動態尾韻保底 >=t_last)"]:::stage3Style
+        L3 --> L4 --> AC
+    end
+
+    subgraph L5["Layer 5: 時間軸確定性自癒與 8 維度雙軌品質審計 (edl_auditor.py)"]
+        SAN["物理時間軸單調自癒<br/>(剔除冗餘子片段、消解微重疊、縫合 <0.45s 閃幀)"]:::stage4Style
+        AUD["8 維度雙軌品質審計 & agent_verdict 閘門<br/>(Whisper + Gemini 雙軌重講檢查、腳本覆蓋率與節奏審核)"]:::stage4Style
+        SAN --> AUD
+    end
+
+    subgraph Deliverables["最終交付成果 (<input_dir>/output/)"]
+        OUT_MP4["交付成果: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox 硬體加速 + 15ms 等功率微淡化)"]:::outputStyle
+        OUT_NLE["交付成果: 多平台 NLE 剪輯時間軸<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_REP["交付成果: 8 維度品質審計報告<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
+    end
+
+    IN --> W_ASR
+    IN --> MODE
+    SC -.-> MODE
+    W_JSON --> MODE
+    SC -.-> REPAIR
+    REPAIR --> L3
+    W_JSON --> L3
+    AC --> SAN
+    AUD --> OUT_MP4
+    AUD --> OUT_NLE
+    AUD --> OUT_REP
+```
+
 1. **第一層：純聲學與標點子句切分 (`transcribe.py`)**：
    - 透過 Whisper 提取逐字時間戳，僅依據物理邊界切分 `Sentence ID`：換氣停頓（`gap >= 0.20s`）、吃螺絲拉長音起音（`word_dur >= 1.20s` 且單字元 `>= 0.45s`）、句尾標點與說話者輪替，同時保留微停頓（`gap < 0.25s`）下的連詞黏合（`CONJUNCTIONS`）。
    - **零 Python 語意猜測原則**：絕不在 Python 端使用字串相似度猜測 NG 重講，語意判斷 100% 交由 LLM 處理。
