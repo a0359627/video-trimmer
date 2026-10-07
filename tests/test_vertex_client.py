@@ -234,8 +234,25 @@ class TestVertexClient(unittest.TestCase):
         extracted = _extract_text_from_response(mock_response)
         self.assertEqual(extracted, '{"final_edl": []}')
 
+    def test_parse_gemini_json_text_formats(self):
+        """Verify _parse_gemini_json_text parses standard dict, raw array, and comma-separated objects."""
+        from scripts.video_trimmer import _parse_gemini_json_text
+
+        # Case 1: Standard final_edl dict
+        res1 = _parse_gemini_json_text('{"final_edl": [{"clip_id": 1}]}')
+        self.assertEqual(len(res1["final_edl"]), 1)
+
+        # Case 2: Bracketed array of clips
+        res2 = _parse_gemini_json_text('[{"clip_id": 1}, {"clip_id": 2}]')
+        self.assertEqual(len(res2["final_edl"]), 2)
+
+        # Case 3: Comma-separated objects without outer list brackets
+        res3 = _parse_gemini_json_text('{"clip_id": 1},\n{"clip_id": 2}')
+        self.assertEqual(len(res3["final_edl"]), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
+
 
 

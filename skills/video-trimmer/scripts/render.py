@@ -75,7 +75,7 @@ def _build_render_cmd(
             f"[{i}:v]setpts=PTS-STARTPTS[v{i}]; "
             f"[{i}:a]asetpts=PTS-STARTPTS,"
             f"afade=t=in:st=0:d={fade_d:.3f}:curve=iqsin,"
-            f"afade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}:curve=oqsin[a{i}];"
+            f"afade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}:curve=qsin[a{i}];"
         )
 
     concat_inputs = "".join([f"[v{i}][a{i}]" for i in range(n)])

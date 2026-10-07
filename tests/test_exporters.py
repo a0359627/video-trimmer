@@ -5,7 +5,7 @@ import unittest
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
-from scripts.exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
+from scripts.exporters import generate_edl_csv, generate_edl_report, generate_fcp7_xml, generate_fcpxml
 
 
 def _sample_edl():
@@ -56,6 +56,47 @@ class TestGenerateFcp7Xml(unittest.TestCase):
 
             second_clip = root.findall(".//video//clipitem")[1]
             assert int(second_clip.find("start").text) == round(15.0 * fps) - round(10.0 * fps)
+
+    def test_camera_timecode_offsets_frames_properly(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "take1.mp4"
+            video_path.write_bytes(b"")
+            xml_path = tmp_path / "out.xml"
+            fps = 24.0
+            # 01:00:00:00 at 24fps = 86400 frames
+            start_tc = "01:00:00:00"
+            expected_offset = 86400
+
+            generate_fcp7_xml(_sample_edl(), video_path, total_source_dur=30.0, output_xml_path=xml_path,
+                               width=1920, height=1080, fps=fps, start_tc=start_tc)
+
+            root = ET.parse(xml_path).getroot()
+            first_clip = root.find(".//video//clipitem")
+            assert int(first_clip.find("in").text) == round(10.0 * fps)
+            assert int(first_clip.find("out").text) == round(15.0 * fps)
+
+            tc_node = root.find(".//file//timecode")
+            assert tc_node.findtext("string") == "01:00:00:00"
+            # In FCP7 XML for DaVinci Resolve, frame must not be present in file timecode to prevent freeze-frame
+            assert tc_node.find("frame") is None
+
+    def test_clipitem_ids_and_file_ids_are_globally_unique(self):
+        """Verify all clipitem IDs and file IDs are globally unique to prevent Resolve media disconnect."""
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "take1.mp4"
+            video_path.write_bytes(b"")
+            xml_path = tmp_path / "out.xml"
+
+            generate_fcp7_xml(_sample_edl(), video_path, total_source_dur=30.0, output_xml_path=xml_path,
+                               width=1920, height=1080, fps=24.0)
+
+            root = ET.parse(xml_path).getroot()
+            clip_ids = [elem.get("id") for elem in root.findall(".//clipitem")]
+            assert len(clip_ids) == len(set(clip_ids)), f"Duplicate clipitem IDs detected: {clip_ids}"
+            file_ids = {elem.get("id") for elem in root.findall(".//file")}
+            assert file_ids.isdisjoint(clip_ids), f"File IDs and Clip IDs must never collide: {file_ids & set(clip_ids)}"
 
 
 class TestGenerateFcpxml(unittest.TestCase):
@@ -121,6 +162,23 @@ class TestGenerateEdlCsv(unittest.TestCase):
             assert '""你好""' in content
 
 
+class TestGenerateEdlReport(unittest.TestCase):
+    def test_report_contains_metrics_and_markdown_table(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            report_path = tmp_path / "out_report.md"
+            generate_edl_report(_sample_edl(), total_source_dur=30.0, report_path=report_path, base_name="test_video")
+
+            content = report_path.read_text(encoding="utf-8")
+            assert "# test_video EDL 剪輯驗證報告" in content
+            assert "原始素材時長: 30.00 秒" in content
+            assert "| Clip ID | 題旨/段落 |" in content
+            assert "| 1 | 開場 | 10.00 | 15.00 | 5.00 | 4.00 | 大家好 |" in content
+            # Ensure zero emojis in headings or tables
+            for forbidden_emoji in ["🎬", "📊", "✅", "❌", "⏱️"]:
+                assert forbidden_emoji not in content
+
+
 class TestRenderCutVideo(unittest.TestCase):
     def test_build_render_cmd_uses_per_clip_fast_seeking_and_gop_30(self):
         from scripts.render import _build_render_cmd
@@ -138,7 +196,7 @@ class TestRenderCutVideo(unittest.TestCase):
         self.assertIn("-hwaccel videotoolbox -ss 10.000 -to 15.000 -i raw_footage.mp4", cmd_str)
         self.assertIn("-hwaccel videotoolbox -ss 20.000 -to 27.500 -i raw_footage.mp4", cmd_str)
         self.assertIn("curve=iqsin", cmd_str)
-        self.assertIn("curve=oqsin", cmd_str)
+        self.assertIn("curve=qsin", cmd_str)
         self.assertIn("-c:v h264_videotoolbox -b:v 12M -g 30", cmd_str)
         self.assertIn("-movflags +faststart", cmd_str)
 

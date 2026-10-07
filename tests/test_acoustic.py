@@ -102,3 +102,18 @@ class TestRefineSpeechBoundsLocked(unittest.TestCase):
             prev_sentence_end=prev_sentence_end,
         )
         assert final_in_capped >= prev_sentence_end - 1e-9
+
+    def test_leading_speech_is_preserved_never_jumped(self):
+        """聲學層完整保護句首主語，絕不因後續存在自然換氣停頓而跨越跳切。"""
+        subject_speech = _sine(1.0)  # 1.0s 句首主語 (如「說到這裡」)
+        pause = _silence(0.50)  # 500ms 自然呼吸停頓
+        main_speech = _sine(1.50)  # 後續語句
+        audio = np.concatenate([subject_speech, pause, main_speech, _silence(0.5)])
+        total_dur = len(audio) / SR
+
+        final_in, _, _, _, _ = refine_speech_bounds_locked(
+            audio, SR, t_first=0.0, t_last=3.0, total_dur=total_dur, transcript="說到這裡的老故事"
+        )
+        # 必須完整保留句首主語，起點不得跳躍至 1.0s 之後
+        self.assertLessEqual(final_in, 0.15)
+

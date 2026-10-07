@@ -50,6 +50,16 @@ FILLER_PREFIXES = (
 )
 
 
+def normalize_phonetic_homophones(text: str) -> str:
+    """Canonicalize frequent Chinese homophone drift in Whisper ASR (他/她/它, 得/地/的, etc.)."""
+    t = re.sub(r"[他她]", "它", text)
+    t = re.sub(r"[得地]", "的", t)
+    t = re.sub(r"作", "做", t)
+    t = re.sub(r"再", "在", t)
+    t = re.sub(r"它也成", "它也曾", t)
+    return t
+
+
 def strip_filler_words(text: str) -> str:
     """
     Remove common spoken filler prefixes and non-alphanumeric characters.
@@ -64,6 +74,7 @@ def strip_filler_words(text: str) -> str:
                 cleaned = cleaned[len(prefix) :].lstrip("，,、 　")
                 changed = True
                 break
+    cleaned = normalize_phonetic_homophones(cleaned)
     return re.sub(r"[^\w一-鿿]", "", cleaned).lower()
 
 
@@ -120,8 +131,11 @@ def is_earlier_sentence_ng_retake(prev_text: str, next_text: str) -> bool:
     if is_fuzzy_prefix_restart(prev_text, next_text):
         return True
 
-    p_norm = normalize_text(prev_text)
-    n_norm = normalize_text(next_text)
+    p_norm = strip_filler_words(prev_text)
+    n_norm = strip_filler_words(next_text)
+    if len(p_norm) < 3 or len(n_norm) < 3:
+        p_norm = normalize_text(prev_text)
+        n_norm = normalize_text(next_text)
     if len(p_norm) < 3 or len(n_norm) < 3:
         return False
 
@@ -148,16 +162,18 @@ CONJUNCTIONS = ("但是", "而且", "所以", "然而", "如果", "因為", "不
 def _split_sentence_on_paused_restarts(
     sentence_data: dict,
     min_pause_sec: float = 0.22,
-    min_clause_chars: int = 5,
+    min_clause_chars: int = 4,
 ) -> list[dict]:
     """
-    Split a merged sentence at physical intra-sentence pauses or stretched boundary words.
+    Split a merged sentence at physical intra-sentence pauses, stretched boundary words,
+    or rapid prefix restarts (stutters/retakes where the speaker restarts the clause opening).
 
     ASD-STE100:
-    Evaluate word-level acoustic gaps and durations without text-similarity comparisons.
-    Split when an internal pause (gap >= min_pause_sec) or a stretched word (>= 0.90s)
-    separates two complete clauses of at least min_clause_chars characters.
-    Keep conjunction prefixes attached when the gap is below 0.85s.
+    Evaluate word-level acoustic gaps and durations.
+    When a physical pause (gap >= min_pause_sec) or stretched onset separates two clauses,
+    or when the speaker immediately restarts the opening clause prefix (Prefix Anchor Restart),
+    split into independent sentence units so the LLM can arbitrate each take individually.
+    Keep conjunction prefixes attached when the gap is below 0.85s unless an exact restart occurs.
     """
     words = sentence_data.get("words", [])
     if len(words) < 6:
@@ -165,36 +181,75 @@ def _split_sentence_on_paused_restarts(
 
     split_word_indices = []
     seg_start_idx = 0
+    n = len(words)
 
-    for j in range(1, len(words)):
+    for j in range(1, n):
         gap = float(words[j].get("start", 0.0)) - float(words[j - 1].get("end", 0.0))
         word_dur = float(words[j].get("end", 0.0)) - float(words[j].get("start", 0.0))
         w_chars = max(1, len(normalize_text(words[j].get("word", ""))))
         is_stretched_onset = (word_dur >= 1.20) and ((word_dur / w_chars) >= 0.45)
-
-        has_physical_pause = (gap >= min_pause_sec) or is_stretched_onset
-        if not has_physical_pause:
-            continue
 
         prev_text = "".join(w.get("word", "") for w in words[seg_start_idx:j]).strip()
         rem_text = "".join(w.get("word", "") for w in words[j:]).strip()
         prev_norm = normalize_text(prev_text)
         rem_norm = normalize_text(rem_text)
 
-        if len(prev_norm) < min_clause_chars or len(rem_norm) < min_clause_chars:
+        if len(prev_norm) < 1 or len(rem_norm) < 2:
             continue
 
-        if gap < 0.85 and any(rem_text.startswith(c) for c in CONJUNCTIONS):
-            continue
+        # Immediate stutter repetition at clause start (e.g. "它 它", "這 這")
+        is_opening_stutter = (
+            (j - seg_start_idx == 2)
+            and len(prev_norm) <= 4
+            and (normalize_text(words[seg_start_idx].get("word", "")) == normalize_text(words[seg_start_idx + 1].get("word", "")))
+            and len(rem_norm) >= 3
+        )
 
-        split_word_indices.append(j)
-        seg_start_idx = j
+        # Prefix Anchor Restart Detection (rapid retakes where speaker repeats the opening phrase)
+        curr_opening = normalize_text("".join(w.get("word", "") for w in words[seg_start_idx : seg_start_idx + 4]))
+        cand_opening = normalize_text("".join(w.get("word", "") for w in words[j : j + 4]))
+        cand_stripped = strip_filler_words(cand_opening)
+
+        has_prefix_restart = False
+        if len(curr_opening) >= 3:
+            if len(cand_opening) >= 3 and cand_opening.startswith(curr_opening[:3]):
+                has_prefix_restart = True
+            elif len(cand_stripped) >= 3 and cand_stripped.startswith(curr_opening[:3]):
+                has_prefix_restart = True
+
+        has_physical_pause = (gap >= min_pause_sec) or is_stretched_onset
+
+        # Incomplete syntax protection (decimals, digits, prepositions)
+        is_prev_incomplete_num = bool(re.search(r'\d+\.$', prev_text.strip())) or bool(re.search(r'\d+$', prev_text.strip()) and re.match(r'^[0-9.%]', rem_text.strip()))
+        is_prev_incomplete_prep = any(prev_text.strip().endswith(p) for p in ("與", "和", "或", "在", "的", "把", "將", "向", "對", "從", "自"))
+
+        should_split = False
+        if is_opening_stutter:
+            should_split = True
+        elif has_prefix_restart and (j - seg_start_idx >= 2 and len(prev_norm) >= 3):
+            should_split = True
+        elif has_physical_pause and (
+            (len(prev_norm) >= min_clause_chars and len(rem_norm) >= min_clause_chars)
+            or (gap >= 0.80 and len(prev_norm) >= 3 and len(rem_norm) >= 3)
+        ):
+            should_split = True
+
+        if should_split and not has_prefix_restart and not is_opening_stutter and gap < 1.20 and word_dur < 1.50:
+            if is_prev_incomplete_num or is_prev_incomplete_prep:
+                should_split = False
+
+        if should_split and not has_prefix_restart and not is_opening_stutter and gap < 0.85 and any(rem_text.startswith(c) for c in CONJUNCTIONS):
+            should_split = False
+
+        if should_split:
+            split_word_indices.append(j)
+            seg_start_idx = j
 
     if not split_word_indices:
         return [sentence_data]
 
     sub_sentences = []
-    boundaries = [0] + split_word_indices + [len(words)]
+    boundaries = [0] + split_word_indices + [n]
     for idx in range(len(boundaries) - 1):
         w_slice = words[boundaries[idx] : boundaries[idx + 1]]
         if not w_slice:
@@ -228,17 +283,20 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
         return []
 
     CLOSURE_PUNCT = ("。", "！", "？", "!", "?", "……", "...")
+    MODAL_PARTICLES = ("啊", "嗎", "吧", "呢", "呀", "啦", "囉", "喔", "哦", "耶")
 
     raw_sentences = []
     curr = None
+    prev_s = None
 
-    for s in segments:
+    for s_idx, s in enumerate(segments):
         s_text = s["text"].strip()
         s_start = s["start"]
         s_end = s["end"]
         s_words = s.get("words", [])
         s_is_target = s.get("is_target_speaker", True)
         s_spk = s.get("speaker_id", "SPEAKER_00")
+        s_next = segments[s_idx + 1] if s_idx + 1 < len(segments) else None
 
         if curr is None:
             curr = {
@@ -252,11 +310,13 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
                 "is_target_speaker": s_is_target,
             }
             _compute_sentence_speaker(curr)
+            prev_s = s
             continue
 
         gap = s_start - curr["end"]
         curr_text = curr["text"].strip()
         curr_norm_len = len(normalize_text(curr_text))
+        s_norm_len = len(normalize_text(s_text))
         dur = s_end - curr["start"]
 
         first_w_stretched = False
@@ -266,15 +326,35 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
             fw_chars = max(1, len(normalize_text(fw.get("word", ""))))
             first_w_stretched = (fw_dur >= 1.20) and ((fw_dur / fw_chars) >= 0.45)
 
+        # Rule 0: Retake restart detection against previous segment or current sentence head
+        is_restart = False
+        if prev_s and (is_fuzzy_prefix_restart(prev_s["text"], s_text) or is_earlier_sentence_ng_retake(prev_s["text"], s_text)):
+            is_restart = True
+        elif is_fuzzy_prefix_restart(curr_text, s_text) or is_earlier_sentence_ng_retake(curr_text, s_text):
+            is_restart = True
+
+        # Forward retake check: if s is followed by a restart of itself in s_next, split before s so s does not pollute curr
+        is_s_retake_head = False
+        if s_next and (is_fuzzy_prefix_restart(s_text, s_next["text"]) or is_earlier_sentence_ng_retake(s_text, s_next["text"])):
+            is_s_retake_head = True
+
         should_split = False
+        if is_restart or is_s_retake_head:
+            should_split = True
         # Rule 1: Physical respiration pause or stretched onset when current clause has sufficient length
-        if gap >= 0.55 or ((gap >= max_gap or first_w_stretched) and curr_norm_len >= 5):
+        elif gap >= 0.55 or ((gap >= max_gap or first_w_stretched) and curr_norm_len >= 5):
             should_split = True
         # Rule 2: Clause duration ceiling reached with micro-pause
         elif dur >= max_sentence_dur and gap >= 0.12:
             should_split = True
         # Rule 3: Closure punctuation with micro-pause
         elif any(curr_text.endswith(p) for p in CLOSURE_PUNCT) and gap >= 0.15:
+            should_split = True
+        # Rule 3b: Modal particles marking sentence question / exclamatory closure
+        elif any(curr_text.endswith(p) for p in MODAL_PARTICLES) and curr_norm_len >= 5:
+            should_split = True
+        # Rule 3c: Natural clause boundary when accumulated clause exceeds 3.8s and 18 chars without conjunction
+        elif (dur >= 3.8 and curr_norm_len >= 18) and s_norm_len >= 6 and not any(s_text.startswith(c) for c in CONJUNCTIONS):
             should_split = True
 
         # Rule 4: Slate cue or script language switch (e.g. alphanumeric slate vs Japanese/Chinese)
@@ -300,10 +380,17 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
             should_split = True
 
         # Rule 8: Conjunction attachment protection (commit 0b579f4 invariant)
-        if should_split and gap < 0.85 and dur < max_sentence_dur * 1.4:
+        if should_split and not is_restart and not is_s_retake_head and gap < 0.85 and dur < max_sentence_dur * 1.4:
             if curr.get("is_target_speaker", True) == s_is_target and curr.get("speaker_id") == s_spk:
                 if any(s_text.startswith(c) for c in CONJUNCTIONS):
                     should_split = False
+
+        # Rule 8b: Incomplete syntax protection (decimals, digits, prepositions)
+        is_curr_incomplete_num = bool(re.search(r'\d+\.$', curr_text)) or bool(re.search(r'\d+$', curr_text) and re.match(r'^[0-9.%]', s_text))
+        is_curr_incomplete_prep = any(curr_text.endswith(p) for p in ("與", "和", "或", "在", "的", "把", "將", "向", "對", "從", "自"))
+        if should_split and not is_restart and not is_s_retake_head and gap < 1.2:
+            if is_curr_incomplete_num or is_curr_incomplete_prep:
+                should_split = False
 
         if should_split:
             _compute_sentence_speaker(curr)
@@ -329,6 +416,8 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
             curr["words"].extend(s_words)
             curr["orig_segment_ids"].append(s["id"])
             _compute_sentence_speaker(curr)
+
+        prev_s = s
 
     if curr is not None:
         _compute_sentence_speaker(curr)
@@ -440,6 +529,7 @@ def format_whisper_transcript_for_prompt(whisper_sentences):
         "2. 任何由場外小幫手/導播喊出的口令（如 Action、報幕代號 CDA82/CTA-S2、CDA84 等，主講人嘴巴閉著或在等待）屬於無效場外音，嚴禁選入 final_edl！",
         "3. 錄影空檔中主講人偏離鏡頭與工作人員之閒聊、自我檢討（如「這段不理想」），屬於 blooper/chatter，亦嚴禁選入 final_edl！",
         "4. 若相鄰或相近的多個 Sentence 講述相同或重複開頭的台詞（講者吃螺絲重錄），請務必在 `sentence_ids` 中徹底剔除前面的 NG 句，只保留最後一次完整流暢的 Sentence ID！",
+        "5. 孤立短截殘句與棄用假開頭（Abandoned False Starts，話講到一半卡住放棄、只有連詞或片語、隨後重講者，如「雖然研究強烈支持」、「所以說人類」、「健康相關他也曾和口腔菌相」），100% 為無效廢料，絕對嚴禁選入 final_edl！",
         "請在輸出 final_edl 時，於 `sentence_ids` 明確列出保留的 Sentence ID 陣列（並填寫 `start_sentence_id` 與 `end_sentence_id`），",
         "並將 `source_in` 與 `source_out` 對齊起訖句子之時間：\n"
     ]
@@ -668,7 +758,7 @@ def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript:
 
     tgt_norm = normalize_text(transcript)
     whisper_str = "".join(item[2] for item in char_timeline)
-    if not tgt_norm or not whisper_str or len(tgt_norm) >= len(whisper_str) * 0.95:
+    if not tgt_norm or not whisper_str:
         return matched_sentences
 
     matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
@@ -683,6 +773,10 @@ def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript:
     first_char_pos = blocks[0].b
     last_char_pos = min(len(char_timeline) - 1, blocks[-1].b + blocks[-1].size - 1)
 
+    # If full match across boundaries without any trimming needed
+    if first_char_pos == 0 and last_char_pos == len(char_timeline) - 1:
+        return matched_sentences
+
     first_s_idx, first_w_idx, _ = char_timeline[first_char_pos]
     last_s_idx, last_w_idx, _ = char_timeline[last_char_pos]
 
@@ -695,7 +789,22 @@ def _trim_matched_words_by_transcript(matched_sentences: list[dict], transcript:
             continue
 
         w_start = first_w_idx if s_idx == first_s_idx else 0
-        w_end = (last_w_idx + 1) if s_idx == last_s_idx else len(words)
+        # Protect tail of sentence: allow trimming tail stumble only if:
+        # 1) It consists entirely of known blooper tokens (e.g. "好", "不好意思", "對"), OR
+        # 2) There is a distinct acoustic pause (gap >= 0.18s) separating it from the sentence.
+        # Continuous phonation (gap < 0.18s) must never be chopped mid-word due to LLM transcript omissions.
+        omitted_tail = words[last_w_idx + 1 :]
+        BLOOPER_TAIL_WORDS = {
+            "好", "對", "嗯", "啊", "ok", "OK", "噯", "喂", "卡", "謝謝", "不好意思", "再一次", "重來", "幹嘛呢"
+        }
+        is_all_blooper = bool(omitted_tail) and all(
+            normalize_text(w.get("word", "")).lower() in BLOOPER_TAIL_WORDS for w in omitted_tail
+        )
+        tail_gap = (omitted_tail[0]["start"] - words[last_w_idx]["end"]) if omitted_tail else 0.0
+        if s_idx == last_s_idx and (is_all_blooper or tail_gap >= 0.18):
+            w_end = last_w_idx + 1
+        else:
+            w_end = len(words)
         sliced_words = words[w_start:w_end]
         if not sliced_words:
             continue
@@ -759,8 +868,8 @@ def resolve_clip_sub_units(
     whisper_units: list[dict],
     clip_data: dict,
     total_dur: float,
-    max_internal_gap: float = 0.40,
-    max_word_gap: float = 0.45,
+    max_internal_gap: float = 0.65,
+    max_word_gap: float = 0.70,
 ) -> list[dict]:
     """
     Resolve a single EDL clip into one or more compact speech sub-units.
@@ -908,7 +1017,7 @@ def resolve_clip_sub_units(
 
 def coalesce_adjacent_sub_units(
     expanded_units: list[dict],
-    max_internal_gap: float = 0.40,
+    max_internal_gap: float = 0.65,
 ) -> list[dict]:
     """
     Coalesce consecutive sub-units across clip boundaries when no sentence ID is skipped
@@ -956,7 +1065,7 @@ def calculate_active_script_window(
     whisper_units: list[dict],
     script_text: str,
     total_duration: float,
-    padding_seconds: float = 20.0,
+    padding_seconds: float = 2.0,
 ) -> tuple[float, float, list[dict]]:
     """
     Align spoken clauses from a reference script against Whisper sentences to locate
@@ -1020,11 +1129,207 @@ def calculate_active_script_window(
     if (win_end - win_start) >= total_duration * 0.85:
         return 0.0, total_duration, whisper_units
 
-    filtered_units = [
-        u for u in whisper_units
-        if float(u.get("end", 0.0)) >= win_start and float(u.get("start", 0.0)) <= win_end
-    ]
+    filtered_units = whisper_units[first_idx : last_idx + 1]
     return win_start, win_end, (filtered_units or whisper_units)
+
+
+def trim_cross_clip_seam_overlaps(
+    units: list[dict],
+    whisper_units: list[dict],
+    min_overlap_chars: int = 4,
+) -> list[dict]:
+    """
+    Trim acoustic tail-to-head text overlaps and head stutters across adjacent EDL cut seams.
+
+    ASD-STE100:
+    Compare adjacent clips across cut seams.
+    1. If the tail of clip A shares a matching phrase (>= min_overlap_chars) with the head of clip B,
+       trim clip A's t_last/source_out to end before the duplicated words.
+    2. If clip B begins with an immediate stutter (repeating its own opening words),
+       trim clip B's t_first/source_in to start at the final take of that opening phrase.
+    This eliminates repeated speech across cuts and aligns with the editor's cuts.
+    """
+    if not units or not whisper_units:
+        return units
+
+    all_words = sorted(
+        [w for s in whisper_units for w in s.get("words", []) if "start" in w and "end" in w],
+        key=lambda x: float(x["start"]),
+    )
+    if not all_words:
+        return units
+
+    # 1. Intra-clip opening stutter check: clean each clip's head if it repeats opening words
+    for u in units:
+        in_t = float(u.get("t_first", u.get("source_in", 0.0)))
+        out_t = float(u.get("t_last", u.get("source_out", 0.0)))
+        w = [w for w in all_words if in_t - 0.05 <= float(w["start"]) and float(w["end"]) <= out_t + 0.05]
+        if not w:
+            continue
+        u_words = w[:25]
+        norm_words = [normalize_text(w.get("word", "")) for w in u_words]
+        full_u_norm = "".join(norm_words)
+
+        trimmed_start_w_idx = None
+
+        # Case A: Immediate single-word or repeated phrase stutter at opening (e.g. "它 它", "這 這")
+        if len(norm_words) >= 2 and norm_words[0] and norm_words[0] == norm_words[1]:
+            trimmed_start_w_idx = 1
+
+        # Case B: Prefix string repeated within the head window
+        if trimmed_start_w_idx is None and len(full_u_norm) >= 6:
+            for p_w_cnt in range(1, min(5, len(u_words))):
+                prefix_str = "".join(norm_words[:p_w_cnt])
+                if len(prefix_str) < 3:
+                    continue
+                rep_pos = full_u_norm.find(prefix_str, len(prefix_str))
+                if rep_pos != -1 and rep_pos <= 60:
+                    # If repeated immediately or within 6 chars (immediate restart of opening clause)
+                    if rep_pos <= len(prefix_str) + 6:
+                        c_acc = 0
+                        for w_i, nw in enumerate(norm_words):
+                            if c_acc >= rep_pos:
+                                trimmed_start_w_idx = w_i
+                                break
+                            c_acc += len(nw)
+                    else:
+                        # Stutter abandoned opening before another clause
+                        trimmed_start_w_idx = p_w_cnt
+                    break
+
+        # Case C: Short 1~2 char opening token followed by large dead air (>= 0.8s) or stretch (>= 1.5s)
+        if trimmed_start_w_idx is None and len(u_words) >= 3:
+            for k in (1, 2):
+                if k < len(u_words):
+                    gap_after = float(u_words[k].get("start", 0.0)) - float(u_words[k - 1].get("end", 0.0))
+                    dur_k = float(u_words[k].get("end", 0.0)) - float(u_words[k].get("start", 0.0))
+                    prefix_len = sum(len(norm_words[i]) for i in range(k))
+                    if (gap_after >= 0.80 or dur_k >= 1.50) and prefix_len <= 3:
+                        trimmed_start_w_idx = k if gap_after >= 0.80 else k + 1
+                        break
+
+        if trimmed_start_w_idx is not None and trimmed_start_w_idx > 0 and trimmed_start_w_idx < len(w):
+            trimmed_w = w[trimmed_start_w_idx:]
+            if trimmed_w:
+                new_in = float(trimmed_w[0]["start"])
+                if "t_first" in u:
+                    u["t_first"] = new_in
+                if "source_in" in u:
+                    u["source_in"] = round(new_in, 2)
+                    if "source_out" in u:
+                        u["duration"] = round(u["source_out"] - u["source_in"], 2)
+                u["transcript"] = "".join(w.get("word", "") for w in trimmed_w).strip()
+        elif len(w) >= 6:
+            curr_opening = normalize_text("".join(w.get("word", "") for w in w[0:4]))
+            cand_opening = normalize_text("".join(w.get("word", "") for w in w[4:8]))
+            if len(curr_opening) >= 3 and len(cand_opening) >= 3 and cand_opening.startswith(curr_opening[:3]):
+                trimmed_w = w[4:]
+                if trimmed_w:
+                    new_in = float(trimmed_w[0]["start"])
+                    if "t_first" in u:
+                        u["t_first"] = new_in
+                    if "source_in" in u:
+                        u["source_in"] = round(new_in, 2)
+                        if "source_out" in u:
+                            u["duration"] = round(u["source_out"] - u["source_in"], 2)
+                    u["transcript"] = "".join(w.get("word", "") for w in trimmed_w).strip()
+
+    # 2. Cross-clip seam overlaps and prefix duplicate check
+    dropped_indices = set()
+
+    for i in range(len(units) - 1):
+        if i in dropped_indices:
+            continue
+        u1 = units[i]
+        u2 = units[i + 1]
+
+        t1_raw = u1.get("transcript", "")
+        t2_raw = u2.get("transcript", "")
+        t1_norm = normalize_text(t1_raw)
+        t2_norm = normalize_text(t2_raw)
+
+        # Seam Prefix Duplicate Check:
+        # If u1 is an abandoned prefix of u2 (e.g. u1 = "所以說人類", u2 = "所以說人類不是從..."):
+        if len(t1_norm) >= 2 and len(t2_norm) >= len(t1_norm):
+            prefix_check_len = min(len(t1_norm), 8)
+            if t2_norm.startswith(t1_norm[:prefix_check_len]) and len(t1_norm) <= 10:
+                logger.info(
+                    "    [Seam Overlap 剔除] 發現片段 %d ('%s') 為下一鏡頭 ('%s') 之棄用假開頭，自動剔除！",
+                    i + 1,
+                    t1_raw,
+                    t2_raw[:25],
+                )
+                dropped_indices.add(i)
+                continue
+
+        in_1 = float(u1.get("t_first", u1.get("source_in", 0.0)))
+        out_1 = float(u1.get("t_last", u1.get("source_out", 0.0)))
+        in_2 = float(u2.get("t_first", u2.get("source_in", 0.0)))
+        out_2 = float(u2.get("t_last", u2.get("source_out", 0.0)))
+
+        w1 = [w for w in all_words if in_1 - 0.05 <= float(w["start"]) and float(w["end"]) <= out_1 + 0.05]
+        w2 = [w for w in all_words if in_2 - 0.05 <= float(w["start"]) and float(w["end"]) <= out_2 + 0.05]
+
+        if not w1 or not w2:
+            continue
+
+        tail_w = w1[-20:]
+        head_w = w2[:20]
+
+        tail_norm = normalize_text("".join(w.get("word", "") for w in tail_w))
+        head_norm = normalize_text("".join(w.get("word", "") for w in head_w))
+
+        if len(tail_norm) >= 2 and len(head_norm) >= 2:
+            matcher = difflib.SequenceMatcher(None, tail_norm, head_norm)
+            match = matcher.find_longest_match(0, len(tail_norm), 0, len(head_norm))
+
+            # Anchor condition: match reaches the end of tail_norm and is located at the head of head_norm
+            is_seam_anchor = (
+                match.size >= 2
+                and (match.a + match.size >= len(tail_norm) - 1)
+                and (match.b <= 3)
+            )
+
+            if match.size >= min_overlap_chars or is_seam_anchor:
+                cut_char_pos = match.a
+                # Expand backward if shared demonstrative / particle prefix (e.g. '這' vs '這個')
+                if cut_char_pos > 0 and match.b > 0 and tail_norm[cut_char_pos - 1] == head_norm[match.b - 1]:
+                    cut_char_pos -= 1
+                elif cut_char_pos > 0 and tail_norm[cut_char_pos - 1] in ("這", "那") and any(c in head_norm[:match.b] for c in ("這", "那")):
+                    cut_char_pos -= 1
+
+                char_count = 0
+                cut_idx = None
+                for idx, w in enumerate(tail_w):
+                    wn = normalize_text(w.get("word", ""))
+                    if not wn:
+                        continue
+                    if char_count + len(wn) > cut_char_pos:
+                        cut_idx = idx
+                        break
+                    char_count += len(wn)
+
+                if cut_idx == 0 and len(w1) <= 12:
+                    dropped_indices.add(i)
+                    continue
+                elif cut_idx is not None and cut_idx > 0:
+                    kept_tail = tail_w[:cut_idx]
+                    trimmed_w1 = w1[:-len(tail_w)] + kept_tail
+                    if trimmed_w1:
+                        new_out = float(trimmed_w1[-1]["end"])
+                        if "t_last" in u1:
+                            u1["t_last"] = new_out
+                        if "source_out" in u1:
+                            u1["source_out"] = round(new_out, 2)
+                            if "source_in" in u1:
+                                u1["duration"] = round(u1["source_out"] - u1["source_in"], 2)
+                        u1["next_sentence_start"] = in_2
+                        u1["transcript"] = "".join(w.get("word", "") for w in trimmed_w1).strip()
+
+    if dropped_indices:
+        units = [u for idx, u in enumerate(units) if idx not in dropped_indices]
+
+    return units
 
 
 def _are_sentences_retake_related(text_a: str, text_b: str) -> bool:

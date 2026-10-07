@@ -43,7 +43,7 @@ if __package__ in (None, ""):
 from .acoustic import refine_speech_bounds_locked
 from .constants import ALLOWED_INPUT_EXTENSIONS
 from .exceptions import InvalidInputError, VideoTrimmerError
-from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
+from .exporters import generate_edl_csv, generate_edl_report, generate_fcp7_xml, generate_fcpxml, get_video_timecode
 from .gcs_utils import delete_gcs_blob, is_gdrive_source, download_gdrive_file_with_cache
 from .gemini_client import (
     build_prompt,
@@ -61,6 +61,8 @@ from .transcribe import (
     detect_chunk_boundaries,
     resolve_clip_sub_units,
     transcribe_video_whisper,
+    trim_cross_clip_seam_overlaps,
+    normalize_text,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,15 +75,33 @@ def _parse_gemini_json_text(raw_json: str) -> dict:
         cleaned = cleaned.split("```json")[1].split("```")[0].strip()
     elif "```" in cleaned:
         cleaned = cleaned.split("```")[1].split("```")[0].strip()
-    elif not cleaned.startswith("{") and "{" in cleaned:
-        start_idx = cleaned.find("{")
-        end_idx = cleaned.rfind("}")
-        if start_idx != -1 and end_idx != -1:
-            cleaned = cleaned[start_idx : end_idx + 1].strip()
+    else:
+        first_bracket = cleaned.find("[")
+        first_brace = cleaned.find("{")
+        if first_bracket != -1 and (first_brace == -1 or first_bracket < first_brace):
+            last_bracket = cleaned.rfind("]")
+            if last_bracket != -1 and last_bracket > first_bracket:
+                cleaned = cleaned[first_bracket : last_bracket + 1].strip()
+        elif first_brace != -1:
+            last_brace = cleaned.rfind("}")
+            if last_brace != -1 and last_brace > first_brace:
+                cleaned = cleaned[first_brace : last_brace + 1].strip()
+
     try:
-        return json.loads(cleaned)
-    except Exception as e:
-        raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
+        data = json.loads(cleaned)
+        if isinstance(data, list):
+            return {"final_edl": data}
+        return data
+    except Exception:
+        # Fallback: if Gemini returned comma-separated objects without outer list brackets
+        try:
+            wrapped = f"[{cleaned}]"
+            data = json.loads(wrapped)
+            if isinstance(data, list):
+                return {"final_edl": data}
+        except Exception as e:
+            raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
+    return {}
 
 
 def _setup_logging(verbose):
@@ -190,7 +210,7 @@ def _run(args):
                 whisper_units=whisper_units,
                 script_text=script_text,
                 total_duration=total_dur,
-                padding_seconds=20.0,
+                padding_seconds=2.0,
             )
             if win_start > 0.0 or win_end < total_dur:
                 logger.info(
@@ -324,6 +344,22 @@ def _run(args):
     # Coalesce adjacent continuous sub-units across clip boundaries when gap < 0.40s and no ID is skipped
     filtered_units = coalesce_adjacent_sub_units(expanded_units)
 
+    # Trim tail-to-head text overlaps and head stutters across adjacent EDL cut seams
+    filtered_units = trim_cross_clip_seam_overlaps(filtered_units, whisper_units)
+
+    # 5b. 過濾孤立無效的連詞或語氣詞殘片 (Orphan Conjunction / Particle Filter)
+    # 如時長 < 2.5 秒且文本僅有 "所以"、"但是" 等獨立殘句
+    orphan_words = {"所以", "但是", "而且", "然而", "如果", "因為", "不過", "雖然", "或是", "或者", "好", "對", "ok", "OK"}
+    pruned_units = []
+    for u in filtered_units:
+        norm_t = normalize_text(u.get("transcript", ""))
+        dur_est = float(u.get("t_last", 0.0)) - float(u.get("t_first", 0.0))
+        if len(norm_t) <= 2 and norm_t in orphan_words and dur_est < 2.5:
+            logger.info("    [孤立殘片剔除] 發現無效孤立詞片段 ('%s', 預估長度 %.2fs)，自動剔除！", u.get("transcript"), dur_est)
+            continue
+        pruned_units.append(u)
+    filtered_units = pruned_units
+
     # 5c. 針對每個保留子片段獨立執行聲學包絡收緊與微呼吸邊界鎖定
     refined_edl = []
     for seq_id, su in enumerate(filtered_units, start=1):
@@ -381,18 +417,29 @@ def _run(args):
     generate_edl_csv(refined_edl, csv_path)
     logger.info("==> 7. 輸出表格清單: %s", csv_path.name)
 
+    cam_tc = get_video_timecode(video_path)
+    if cam_tc != "00:00:00:00":
+        logger.info("    [相機時間碼] 偵測到內嵌機身時間碼: %s，寫入 XML 以防剪輯軟體脫機", cam_tc)
+
     xml_path = out_dir / f"{base_name}_{tag}_edl.xml"
-    generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps)
+    generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps, start_tc=cam_tc)
     logger.info("==> 8. 輸出通用剪輯工程檔: %s", xml_path.name)
 
     fcpxml_path = out_dir / f"{base_name}_{tag}_edl.fcpxml"
     generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps)
     logger.info("==> 9. 輸出 Final Cut Pro X 工程檔: %s", fcpxml_path.name)
 
-    out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
-    logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
-    render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
-    logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
+    report_path = out_dir / f"{base_name}_{tag}_edl_report.md"
+    generate_edl_report(refined_edl, total_dur, report_path, base_name=f"{base_name} ({tag})")
+    logger.info("==> 10. 輸出剪輯驗證報告: %s", report_path.name)
+
+    if not getattr(args, "no_render", False):
+        out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
+        logger.info("==> 11. FFmpeg 渲染成片: %s ...", out_mp4.name)
+        render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
+        logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
+    else:
+        logger.info("==> 11. 跳過成片渲染 (--no-render)")
 
 
 def main():
@@ -408,6 +455,7 @@ def main():
     parser.add_argument("--bucket", default=None, help="用於暫存視訊的 GCS Bucket (預設讀取 VIDEO_TRIMMER_BUCKET)")
     parser.add_argument("--keep-gcs-upload", action="store_true", help="保留上傳至 GCS 的暫存視訊，不於推論後自動清理")
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
+    parser.add_argument("--no-render", action="store_true", help="跳過 FFmpeg 最終成片渲染，僅輸出工程檔與清單")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
                         help="剪輯節奏風格: 'auto'/'dynamic' (文字剪輯微氣息鎖定, 推薦預設)")
     parser.add_argument("--agentic", action="store_true", help="啟用 Gemini Agentic Video Understanding 動態探索模式")

@@ -71,15 +71,17 @@ video-trimmer/
    - Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`) automatically merges consecutive `Sentence ID`s across adjacent clips when `gap < 0.40s`, eliminating artificial internal jump-cuts.
 5. **Acoustic Onset Snapping (Smart Gap Shortening)**:
    - Scans the pre-speech dead air to snap cut-ins precisely **80ms before vocal cord vibration**, eliminating awkward pre-speech dead air and post-slate pauses.
-6. **Word Ground Truth Tail & Plosive Defense**:
+6. **Word Ground Truth Tail & Continuous Phonation Protection**:
    - Strictly enforces `true_speech_end >= t_last` with forward-only tracking down to ambient room noise.
+   - Continuous Phonation Invariant: When `tail_gap < 0.18s` (speaker in continuous speech flow), trailing words are never trimmed even if omitted from the prompt transcript, completely preserving trailing phonemes and words. Only explicit blooper tokens from the managed whitelist are pruned.
    - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` in words like「台」) and soft trailing nasal vowels without clipping word endings.
 7. **15ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
    - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15ms `afade` equal-power micro-fades (`iqsin`/`oqsin`) across all cut boundaries.
 8. **Production Script Injection (`--script`)**:
    - Ingests production shooting scripts (`.md` / `.txt`) to guide section-by-section matching and prevent skipping intended talking points.
-9. **Universal NLE Project Export**:
-   - Generates industry-standard **FCP 7 XML** (Adobe Premiere Pro & DaVinci Resolve) and **FCPXML** (Final Cut Pro X), alongside direct high-quality **MP4** renders.
+9. **Universal NLE Project Export & DaVinci Resolve Conform**:
+   - Generates industry-standard **FCP 7 XML** (`xmeml v5` with direct `<sequence>` nesting for Adobe Premiere Pro & DaVinci Resolve), **FCPXML** (Final Cut Pro X), **EDL CSV**, and Markdown validation report (`_edl_report.md`).
+   - Prevents DaVinci Resolve media disconnection by strictly enforcing collision-free XML ID namespaces (`file_id = f"{video_name}_master"`, `clipitem id = f"{video_name}_v{idx}"`, `f"{video_name}_a{idx}"`) and passing embedded camera timecode without `<frame>` tags to prevent freeze-frames.
 
 ---
 

@@ -135,7 +135,7 @@ def refine_speech_bounds_locked(
 
     if in_rms < speech_thresh:
         # Whisper 標記點落在開拍前的死寂發呆空白中 -> 向前掃描尋找真正聲帶起音點 (徹底消除前置空白)
-        search_forward_e = min(t_last - 0.2, t_first + 2.0)
+        search_forward_e = min(t_last - 0.2, t_first + 2.5)
         for t in np.arange(t_first, search_forward_e, 0.01):
             idx = int(t * sr)
             if idx + win >= len(audio):
@@ -161,9 +161,16 @@ def refine_speech_bounds_locked(
                 break
             true_speech_start = t
 
-    target_in = max(0.0, true_speech_start - breath_in)
-    if prev_sentence_end is not None:
-        target_in = max(target_in, prev_sentence_end)
+
+    # 6. 前置呼吸氣息邊界約束：若與前一句結束點間距極短（如急促重講），動態收縮預留邊距，嚴防踩穿前句尾音
+    if prev_sentence_end is not None and true_speech_start > prev_sentence_end:
+        avail_silence = true_speech_start - prev_sentence_end
+        effective_breath_in = min(breath_in, max(0.01, avail_silence * 0.45))
+        target_in = true_speech_start - effective_breath_in
+    else:
+        target_in = max(0.0, true_speech_start - breath_in)
+        if prev_sentence_end is not None:
+            target_in = max(target_in, prev_sentence_end)
     final_in = round(target_in, 2)
 
     in_m = round(t_first - final_in, 2)

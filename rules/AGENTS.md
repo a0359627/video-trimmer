@@ -31,3 +31,9 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 ## 5. Default Static Multimodal Execution
 - Run `video_trimmer.py` in `<PLUGIN_ROOT>` in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) for fast, timeout-free inference.
 - Include `--agentic` only when the user explicitly requests Agentic Video Understanding mode.
+
+## 6. DaVinci Resolve Conform & Phoneme Protection Invariants
+- All generated FCP7 XMLs must maintain global ID namespace separation (`file_id = f"{video_name}_master"`, `clipitem id = f"{video_name}_v{idx}"`, `f"{video_name}_a{idx}"`) to prevent circular DOM references and missing video tracks in DaVinci Resolve.
+- Source camera timecode (`start_tc`) must be preserved in XML `<timecode><string>` without `<frame>` tags to prevent freeze-frame artifacts.
+- Word trimming must strictly observe continuous phonation (`tail_gap < 0.18s` must never be trimmed) and blooper whitelisting to eliminate truncated phonemes at cut boundaries.
+

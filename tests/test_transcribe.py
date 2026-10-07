@@ -140,4 +140,215 @@ class TestMergeWhisperSegmentsToSentences(unittest.TestCase):
         assert sentences[0]["text"] == "例如你自己"
         assert sentences[1]["text"] == "例如你帶著自己手機"
 
+    def test_modal_particles_split_sentence(self):
+        """句尾帶有語氣詞（啊、嗎、呢等）且長度足夠時，強制與下一子句拆開"""
+        segs = [
+            _seg(1, 0.0, 2.08, "這算不算是某種超能力啊"),
+            _seg(2, 2.08, 3.84, "許多人鼓吹原始人飲食法"),
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        self.assertEqual(len(sentences), 2)
+        self.assertEqual(sentences[0]["text"], "這算不算是某種超能力啊")
+        self.assertEqual(sentences[1]["text"], "許多人鼓吹原始人飲食法")
 
+    def test_rapid_intra_sentence_prefix_restarts_split(self):
+        """單句內若出現多次極短促重講（如連續 3 次以上開頭重講），即使微停頓小於 0.22s 也能切分"""
+        words = [
+            {"word": "為了", "start": 0.0, "end": 0.2},
+            {"word": "追查", "start": 0.2, "end": 0.4},
+            {"word": "為了", "start": 0.42, "end": 0.6},
+            {"word": "追查", "start": 0.6, "end": 0.8},
+            {"word": "這誇張", "start": 0.8, "end": 1.1},
+            {"word": "的高考", "start": 1.1, "end": 1.4},
+        ]
+        segs = [_seg(1, 0.0, 1.4, "為了追查 為了追查 這誇張的高考", words=words)]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        self.assertEqual(len(sentences), 2)
+        self.assertEqual(sentences[0]["text"], "為了追查")
+        self.assertEqual(sentences[1]["text"], "為了追查這誇張的高考")
+
+
+    def test_incomplete_number_prevents_split(self):
+        segs = [
+            _seg(1, 0.0, 1.0, "從原本的0."),
+            _seg(2, 1.44, 2.5, "7%到2.7%的比例"),
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        self.assertEqual(len(sentences), 1)
+        self.assertIn("0. 7%", sentences[0]["text"])
+
+    def test_homophone_retake_detection(self):
+        from scripts.transcribe import is_fuzzy_prefix_restart
+        # "它也成" vs "他也曾"
+        self.assertTrue(is_fuzzy_prefix_restart("它也成和口腔健康相關", "他也曾和口腔菌相改變叫差的口腔健康相關"))
+
+
+class TestTrimCrossClipSeamOverlaps(unittest.TestCase):
+    def test_trim_overlapping_tail_text(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        whisper_units = [
+            {
+                "id": 1,
+                "words": [
+                    {"word": "這算不算是某種超能力啊", "start": 0.0, "end": 2.0},
+                    {"word": "許多人鼓吹原始人飲食法", "start": 2.0, "end": 3.8},
+                ],
+            },
+            {
+                "id": 2,
+                "words": [
+                    {"word": "許多鼓吹原始人飲食法的人", "start": 5.0, "end": 7.5},
+                    {"word": "總宣稱我們的基因還停留在石器時代", "start": 7.5, "end": 11.0},
+                ],
+            },
+        ]
+        units = [
+            {"t_first": 0.0, "t_last": 3.8, "transcript": "這算不算是某種超能力啊 許多人鼓吹原始人飲食法"},
+            {"t_first": 5.0, "t_last": 11.0, "transcript": "許多鼓吹原始人飲食法的人 總宣稱我們的基因還停留在石器時代"},
+        ]
+        trimmed = trim_cross_clip_seam_overlaps(units, whisper_units, min_overlap_chars=4)
+        self.assertAlmostEqual(trimmed[0]["t_last"], 2.0, places=1)
+        self.assertIn("這算不算是某種超能力啊", trimmed[0]["transcript"])
+        self.assertNotIn("原始人飲食法", trimmed[0]["transcript"])
+
+    def test_trim_seam_anchor_short_overlap(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        whisper_units = [
+            {
+                "id": 18,
+                "words": [
+                    {"word": "讓冷門外掛變成主流配備", "start": 1695.0, "end": 1699.5},
+                    {"word": "這就叫", "start": 1699.5, "end": 1700.5},
+                ],
+            },
+            {
+                "id": 19,
+                "words": [
+                    {"word": "這就叫", "start": 1704.0, "end": 1705.0},
+                    {"word": "軟性選擇掃蕩", "start": 1705.0, "end": 1708.0},
+                ],
+            },
+        ]
+        units = [
+            {"t_first": 1695.0, "t_last": 1700.5, "transcript": "讓冷門外掛變成主流配備這就叫"},
+            {"t_first": 1704.0, "t_last": 1708.0, "transcript": "這就叫軟性選擇掃蕩"},
+        ]
+        trimmed = trim_cross_clip_seam_overlaps(units, whisper_units, min_overlap_chars=4)
+        self.assertAlmostEqual(trimmed[0]["t_last"], 1699.5, places=1)
+        self.assertEqual(trimmed[0]["transcript"], "讓冷門外掛變成主流配備")
+
+    def test_trim_prefix_duplicate_dropped(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        whisper_units = [
+            {
+                "id": 28,
+                "words": [
+                    {"word": "所以", "start": 1888.77, "end": 1889.20},
+                    {"word": "說", "start": 1889.20, "end": 1889.45},
+                    {"word": "人類", "start": 1889.45, "end": 1889.76},
+                ],
+            },
+            {
+                "id": 29,
+                "words": [
+                    {"word": "所以", "start": 1908.40, "end": 1908.70},
+                    {"word": "說", "start": 1908.70, "end": 1908.90},
+                    {"word": "人類", "start": 1908.90, "end": 1909.20},
+                    {"word": "不是", "start": 1909.20, "end": 1909.50},
+                    {"word": "從舊石器時代", "start": 1909.50, "end": 1910.80},
+                ],
+            },
+        ]
+        units = [
+            {"t_first": 1888.77, "t_last": 1889.76, "transcript": "所以說人類"},
+            {"t_first": 1908.40, "t_last": 1910.80, "transcript": "所以說人類不是從舊石器時代"},
+        ]
+        trimmed = trim_cross_clip_seam_overlaps(units, whisper_units)
+        # Unit 28 should be dropped because it is an abandoned prefix of Unit 29
+        self.assertEqual(len(trimmed), 1)
+        self.assertIn("不是從舊石器時代", trimmed[0]["transcript"])
+
+    def test_trim_intra_clip_opening_stutter(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        whisper_units = [
+            {
+                "id": 16,
+                "words": [
+                    {"word": "這些高好被變異啊", "start": 1675.0, "end": 1677.5},
+                    {"word": "但這不是有人被馬鈴薯咬到", "start": 1678.0, "end": 1681.0},
+                    {"word": "基因突然叮一聲升級", "start": 1681.0, "end": 1683.0},
+                    {"word": "這些高好被變異啊", "start": 1683.0, "end": 1685.0},
+                    {"word": "早在農業出現以前就存在了", "start": 1685.0, "end": 1688.0},
+                ],
+            }
+        ]
+        units = [
+            {"t_first": 1660.0, "t_last": 1670.0, "transcript": "前一個鏡頭的句子"},
+            {
+                "t_first": 1675.0,
+                "t_last": 1688.0,
+                "transcript": "這些高好被變異啊但這不是有人被馬鈴薯咬到基因突然叮一聲升級這些高好被變異啊早在農業出現以前就存在了",
+            },
+        ]
+        trimmed = trim_cross_clip_seam_overlaps(units, whisper_units)
+        self.assertEqual(len(trimmed), 2)
+        # The opening stutter "這些高好被變異啊" before "但" should be trimmed away
+        self.assertAlmostEqual(trimmed[1]["t_first"], 1678.0, places=1)
+        self.assertTrue(trimmed[1]["transcript"].startswith("但這不是"))
+
+    def test_trim_intra_clip_opening_immediate_stutter(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        whisper_units = [
+            {
+                "id": 40,
+                "words": [
+                    {"word": "它", "start": 1065.82, "end": 1066.28},
+                    {"word": "它", "start": 1066.28, "end": 1066.98},
+                    {"word": "規", "start": 1066.98, "end": 1067.00},
+                    {"word": "劃", "start": 1067.00, "end": 1070.96},
+                ],
+            }
+        ]
+        units = [
+            {
+                "t_first": 1065.82,
+                "t_last": 1070.96,
+                "transcript": "它它規劃",
+            }
+        ]
+        trimmed = trim_cross_clip_seam_overlaps(units, whisper_units)
+        self.assertEqual(len(trimmed), 1)
+        # Should trim past the first stutter word into the repeated word
+        self.assertAlmostEqual(trimmed[0]["t_first"], 1066.28, places=2)
+        self.assertNotIn("它它", trimmed[0]["transcript"])
+
+    def test_trim_intra_clip_immediate_phrase_restart(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        whisper_units = [
+            {
+                "id": 2,
+                "words": [
+                    {"word": "另一家是來自", "start": 21.0, "end": 22.5},
+                    {"word": "另一家是來自", "start": 23.0, "end": 24.5},
+                    {"word": "新竹的團隊", "start": 24.5, "end": 26.0},
+                ],
+            }
+        ]
+        units = [
+            {
+                "t_first": 21.0,
+                "t_last": 26.0,
+                "transcript": "另一家是來自另一家是來自新竹的團隊",
+            }
+        ]
+        trimmed = trim_cross_clip_seam_overlaps(units, whisper_units)
+        self.assertEqual(len(trimmed), 1)
+        # Snaps to the second repeated take at 23.0s
+        self.assertAlmostEqual(trimmed[0]["t_first"], 23.0, places=1)
+        self.assertEqual(trimmed[0]["transcript"], "另一家是來自新竹的團隊")

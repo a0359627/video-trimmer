@@ -5,6 +5,7 @@
 
 import logging
 import os
+import subprocess
 import time
 from pathlib import Path
 
@@ -130,12 +131,33 @@ def stage_video_to_gcs(video_source: Path | str, bucket_name: str, gcs_client=No
             "請於命令列指定 --bucket <bucket_name>，或於 .env 中設置 VIDEO_TRIMMER_BUCKET=<bucket_name>。"
         )
 
-    mime_type = guess_mime_type(video_path)
-    blob_name = _unique_raw_blob_name(video_path)
-    logger.info("上傳視訊至 Cloud Storage 暫存 (%.1f MB)...", video_path.stat().st_size / (1024 * 1024))
+    upload_target = video_path
+    file_size_gb = video_path.stat().st_size / (1024 * 1024 * 1024)
+    proxy_candidate = video_path.parent / f"{video_path.stem}_ai_proxy.mp4"
+    if proxy_candidate.exists() and proxy_candidate.stat().st_size > 0:
+        logger.info("    [AI Proxy] 檢測到既有之輕量化 AI Proxy: %s (%.1f MB)，優先供 Vertex AI 視覺分析", proxy_candidate.name, proxy_candidate.stat().st_size / (1024 * 1024))
+        upload_target = proxy_candidate
+    elif file_size_gb > 1.8:
+        logger.info("    [AI Proxy] 視訊大小 (%.1f GB) 超過 Vertex AI 2.0 GB 上限，正在產生輕量化 AI Proxy...", file_size_gb)
+        ffmpeg_bin = "/opt/homebrew/bin/ffmpeg" if Path("/opt/homebrew/bin/ffmpeg").exists() else "ffmpeg"
+        cmd = [
+            ffmpeg_bin, "-hide_banner", "-y",
+            "-hwaccel", "videotoolbox",
+            "-i", str(video_path),
+            "-vf", "scale=-2:540",
+            "-c:v", "h264_videotoolbox", "-b:v", "1200k", "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-b:a", "128k",
+            str(proxy_candidate),
+        ]
+        subprocess.run(cmd, check=True)
+        upload_target = proxy_candidate
+
+    mime_type = guess_mime_type(upload_target)
+    blob_name = _unique_raw_blob_name(upload_target)
+    logger.info("上傳視訊至 Cloud Storage 暫存 (%.1f MB)...", upload_target.stat().st_size / (1024 * 1024))
     t0 = time.time()
     gcs_uri = upload_file_to_gcs(
-        local_path=video_path,
+        local_path=upload_target,
         bucket_name=bucket_name,
         destination_blob_name=blob_name,
         content_type=mime_type,
