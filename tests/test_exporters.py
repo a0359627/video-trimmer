@@ -303,3 +303,39 @@ class TestAnalysisProxy(unittest.TestCase):
             src_dur = probe_video(src)[0]
             with self.assertRaises(FFmpegError):
                 make_analysis_proxy(src, proxy, src_dur + 5.0)
+
+
+class TestMediaFileUrl(unittest.TestCase):
+    def test_url_is_percent_encoded_with_forward_slashes(self):
+        from urllib.parse import unquote, urlparse
+        from scripts.exporters import media_file_url
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "拍帶 資料夾" / "raw footage？.mp4"
+            video.parent.mkdir()
+            video.write_bytes(b"")
+            url = media_file_url(video)
+            self.assertTrue(url.startswith("file://localhost/"))
+            self.assertNotIn("\\", url)
+            self.assertNotIn(" ", url)
+            parsed = urlparse(url)
+            self.assertEqual(parsed.netloc, "localhost")
+            decoded = unquote(parsed.path)
+            if decoded[2:3] == ":":  # /C:/... on Windows
+                decoded = decoded[1:]
+            self.assertEqual(Path(decoded), video.resolve())
+
+    def test_fcp7_xml_and_fcpxml_use_media_file_url(self):
+        from scripts.exporters import media_file_url
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "raw footage.mp4"
+            video.write_bytes(b"")
+            xml_path = Path(tmp) / "out.xml"
+            fcpxml_path = Path(tmp) / "out.fcpxml"
+            edl = _sample_edl()
+            generate_fcp7_xml(edl, video, 30.0, xml_path, 1920, 1080, 24.0)
+            generate_fcpxml(edl, video, 30.0, sum(c["duration"] for c in edl), fcpxml_path, 24.0)
+            url = media_file_url(video)
+            self.assertEqual(ET.parse(xml_path).getroot().find(".//pathurl").text, url)
+            self.assertEqual(ET.parse(fcpxml_path).getroot().find(".//asset").get("src"), url)

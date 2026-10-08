@@ -3,6 +3,18 @@
 from pathlib import Path
 
 
+def media_file_url(video_path):
+    """
+    Return a file URL for NLE media links (file://localhost/<percent-encoded path>).
+
+    Windows paths become file://localhost/C:/... with forward slashes. The old
+    f"file://localhost{path}" form put a raw backslash path after "localhost"
+    on Windows, which Premiere Pro and DaVinci Resolve cannot link.
+    """
+    uri = Path(video_path).resolve().as_uri()  # file:///C:/... or file:///Users/...
+    return "file://localhost" + uri[len("file://"):]
+
+
 def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976):
     """產生 Premiere Pro / DaVinci Resolve 相容的 FCP 7 XML (xmeml v4)"""
     timebase = int(round(fps))
@@ -52,7 +64,7 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
             f'                <end>{end_frame}</end>',
             f'                <file id="file-1">',
             f'                  <name>{video_path.name}</name>',
-            f'                  <pathurl>file://localhost{video_path.resolve()}</pathurl>',
+            f'                  <pathurl>{media_file_url(video_path)}</pathurl>',
             f'                  <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
             f'                  <duration>{s2f(total_source_dur)}</duration>',
             '                </file>',
@@ -115,7 +127,7 @@ def generate_fcpxml(edl, video_path, total_source_dur, total_out_dur, output_fcp
         '<fcpxml version="1.9">',
         '  <resources>',
         '    <format id="r1" name="FFVideoFormat1080p2398" frameDuration="1001/24000s" width="1920" height="1080"/>',
-        f'    <asset id="r2" name="{video_path.name}" src="file://localhost{video_path.resolve()}" start="0s" duration="{total_src_frac}" hasVideo="1" hasAudio="1" format="r1"/>',
+        f'    <asset id="r2" name="{video_path.name}" src="{media_file_url(video_path)}" start="0s" duration="{total_src_frac}" hasVideo="1" hasAudio="1" format="r1"/>',
         '  </resources>',
         '  <library>',
         f'    <event name="VideoTrimmer_{video_path.stem}">',
