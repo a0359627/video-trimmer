@@ -141,3 +141,52 @@ class TestMergeWhisperSegmentsToSentences(unittest.TestCase):
         assert sentences[1]["text"] == "例如你帶著自己手機"
 
 
+
+
+class TestExtractAudio16kMono(unittest.TestCase):
+    def _make_source(self, path, seconds=2):
+        import subprocess
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", f"color=c=black:s=320x240:r=30:d={seconds}",
+                "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={seconds}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(path),
+            ],
+            check=True, capture_output=True,
+        )
+
+    def test_extracts_once_then_reuses(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from scripts.transcribe import audio_16k_path, extract_audio_16k_mono
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "raw_footage.mp4"
+            self._make_source(src)
+            wav = audio_16k_path(tmp, src)
+            self.assertEqual(wav.name, "raw_footage_audio_16k.wav")
+            extract_audio_16k_mono(src, wav, source_duration=2.0)
+            self.assertTrue(wav.exists())
+            with patch("scripts.transcribe.subprocess.run") as mock_run:
+                extract_audio_16k_mono(src, wav, source_duration=2.0)
+                mock_run.assert_not_called()
+
+    def test_short_audio_raises(self):
+        import shutil
+        import tempfile
+        from pathlib import Path
+        from scripts.exceptions import FFmpegError
+        from scripts.transcribe import audio_16k_path, extract_audio_16k_mono
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "raw_footage.mp4"
+            self._make_source(src)
+            with self.assertRaises(FFmpegError):
+                extract_audio_16k_mono(src, audio_16k_path(tmp, src), source_duration=10.0)

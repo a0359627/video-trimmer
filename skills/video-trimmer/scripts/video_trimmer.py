@@ -14,7 +14,6 @@ An intelligent, end-to-end video rough-cut & trimming engine powered by:
 import argparse
 import json
 import logging
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -64,9 +63,11 @@ from .gemini_client import (
 from .render import make_analysis_proxy, probe_video, render_cut_video
 from .transcribe import (
     align_clip_with_whisper,
+    audio_16k_path,
     calculate_active_script_window,
     coalesce_adjacent_sub_units,
     detect_chunk_boundaries,
+    extract_audio_16k_mono,
     resolve_clip_sub_units,
     transcribe_video_whisper,
 )
@@ -191,6 +192,7 @@ def _run(args):
             video_path,
             whisper_json,
             model_name="small",
+            source_duration=total_dur,
         )
 
     whisper_units = whisper_sentences if whisper_sentences else whisper_segs
@@ -385,10 +387,9 @@ def _run(args):
 
     # 第三階段：文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)
     logger.info("==> 5. 執行文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)...")
-    temp_wav = out_dir / f"temp_{base_name}.wav"
-    subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    audio, sr = sf.read(str(temp_wav))
+    # Reuse the 16 kHz audio from the Whisper stage instead of reading the source again.
+    audio_wav = extract_audio_16k_mono(video_path, audio_16k_path(out_dir, video_path), source_duration=total_dur)
+    audio, sr = sf.read(str(audio_wav))
 
     if whisper_units and isinstance(model_edl, dict) and model_edl.get("final_edl"):
         model_edl["final_edl"] = deduplicate_and_sort_clips(
@@ -457,8 +458,6 @@ def _run(args):
         })
         logger.info("    Clip %2d: In=%6.2fs, Out=%6.2fs (%5.2fs) | 首字: %.2fs, 尾字: %.2fs | %s",
                     seq_id, tight_in, tight_out, dur, t_first, t_last, su["topic"])
-
-    temp_wav.unlink(missing_ok=True)
 
     # 5d. 物理時間軸確定性自癒 (Overlap De-confliction, Plosive Tail Floor, Micro-Clip Coalescing)
     refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur)
