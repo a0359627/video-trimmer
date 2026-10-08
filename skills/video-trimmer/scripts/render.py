@@ -6,8 +6,13 @@ import os
 import subprocess
 import sys
 import tempfile
+from pathlib import Path
 
-from .constants import CROSSFADE_DURATION_SEC
+from .constants import (
+    ANALYSIS_PROXY_HEIGHT,
+    ANALYSIS_PROXY_MAX_DURATION_DIFF_SEC,
+    CROSSFADE_DURATION_SEC,
+)
 from .exceptions import FFmpegError
 
 logger = logging.getLogger(__name__)
@@ -186,3 +191,67 @@ def render_cut_video(edl, video_path, out_mp4_path, crf=18):
         logger.debug("FFmpeg encoder %s failed, trying next fallback.", encoder)
 
     raise FFmpegError(f"FFmpeg render failed: {proc.stderr}")
+
+
+def _build_proxy_cmd(video_path, proxy_path, encoder, height=ANALYSIS_PROXY_HEIGHT):
+    """Build the FFmpeg command for a small analysis proxy with the same timeline as the source."""
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(video_path),
+        "-map", "0:v:0", "-map", "0:a:0?",
+        "-vf", f"scale=-2:{height}",
+    ]
+    if encoder in HW_BITRATE_ENCODERS:
+        cmd.extend(["-c:v", encoder, "-b:v", "2M"])
+    else:
+        cmd.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "28"])
+    cmd.extend([
+        "-g", str(DEFAULT_RENDER_GOP),
+        "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-b:a", "128k",
+        "-movflags", "+faststart",
+        str(proxy_path),
+    ])
+    return cmd
+
+
+def _proxy_matches_source(proxy_path, source_duration):
+    try:
+        proxy_duration = probe_video(proxy_path)[0]
+    except (FFmpegError, KeyError, ValueError, StopIteration, json.JSONDecodeError):
+        return False, None
+    return abs(proxy_duration - source_duration) <= ANALYSIS_PROXY_MAX_DURATION_DIFF_SEC, proxy_duration
+
+
+def make_analysis_proxy(video_path, proxy_path, source_duration):
+    """
+    Create a low-resolution analysis proxy for Gemini when the source file is too large.
+
+    The proxy keeps the source timeline (same start and duration), so EDL times
+    from Gemini apply to the original file without conversion. Reuse an existing
+    proxy when its duration matches the source.
+    """
+    proxy_path = Path(proxy_path)
+    if proxy_path.exists():
+        ok, _ = _proxy_matches_source(proxy_path, source_duration)
+        if ok:
+            logger.info("    [分析代理檔] 沿用既有代理檔: %s", proxy_path.name)
+            return proxy_path
+
+    proc = None
+    for encoder, _use_hwaccel in _encoder_attempts():
+        proc = _run(_build_proxy_cmd(video_path, proxy_path, encoder))
+        if proc.returncode == 0:
+            logger.info("    [分析代理檔] 編碼器: %s", encoder)
+            break
+        logger.debug("Proxy encoder %s failed, trying next fallback.", encoder)
+    if proc is None or proc.returncode != 0:
+        raise FFmpegError(f"FFmpeg analysis proxy failed: {proc.stderr if proc else ''}")
+
+    ok, proxy_duration = _proxy_matches_source(proxy_path, source_duration)
+    if not ok:
+        raise FFmpegError(
+            f"Analysis proxy duration {proxy_duration}s does not match source {source_duration:.2f}s. "
+            "The source read may have stopped early (for example, on a cloud streaming drive)."
+        )
+    return proxy_path

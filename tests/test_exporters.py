@@ -252,3 +252,54 @@ class TestResolveOutputDir(unittest.TestCase):
             self.assertTrue(out_dir.is_dir())
 
 
+
+
+class TestAnalysisProxy(unittest.TestCase):
+    def _make_source(self, path, seconds=3):
+        import subprocess
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:r=30:d={seconds}",
+                "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={seconds}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(path),
+            ],
+            check=True, capture_output=True,
+        )
+
+    def test_proxy_keeps_timeline_and_is_reused(self):
+        import shutil
+        from unittest.mock import patch
+        from scripts.render import make_analysis_proxy, probe_video
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "raw_footage.mp4"
+            proxy = Path(tmp) / "raw_footage_gemini_proxy.mp4"
+            self._make_source(src)
+            src_dur = probe_video(src)[0]
+
+            make_analysis_proxy(src, proxy, src_dur)
+            dur, _w, h, _fps = probe_video(proxy)
+            self.assertAlmostEqual(dur, src_dur, delta=0.1)
+            self.assertEqual(h, 720)
+
+            with patch("scripts.render._build_proxy_cmd") as mock_build:
+                make_analysis_proxy(src, proxy, src_dur)
+                mock_build.assert_not_called()
+
+    def test_proxy_shorter_than_source_raises(self):
+        import shutil
+        from scripts.exceptions import FFmpegError
+        from scripts.render import make_analysis_proxy, probe_video
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "raw_footage.mp4"
+            proxy = Path(tmp) / "raw_footage_gemini_proxy.mp4"
+            self._make_source(src)
+            src_dur = probe_video(src)[0]
+            with self.assertRaises(FFmpegError):
+                make_analysis_proxy(src, proxy, src_dur + 5.0)

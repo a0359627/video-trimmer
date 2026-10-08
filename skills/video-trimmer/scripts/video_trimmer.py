@@ -41,7 +41,7 @@ if __package__ in (None, ""):
     __package__ = "scripts"
 
 from .acoustic import refine_speech_bounds_locked
-from .constants import ALLOWED_INPUT_EXTENSIONS
+from .constants import ALLOWED_INPUT_EXTENSIONS, GEMINI_MAX_VIDEO_BYTES
 from .edl_auditor import (
     audit_edl_quality,
     deduplicate_and_sort_clips,
@@ -61,7 +61,7 @@ from .gemini_client import (
     run_gemini_inference,
     stage_video_to_gcs,
 )
-from .render import probe_video, render_cut_video
+from .render import make_analysis_proxy, probe_video, render_cut_video
 from .transcribe import (
     align_clip_with_whisper,
     calculate_active_script_window,
@@ -246,7 +246,17 @@ def _run(args):
         ).removeprefix("gs://") or None
 
         logger.info("==> 3. 準備視訊至 Cloud Storage 暫存...")
-        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(video_path, resolved_bucket)
+        gemini_video_path = video_path
+        if video_path.stat().st_size > GEMINI_MAX_VIDEO_BYTES:
+            # Vertex AI rejects very large video files (400 INVALID_ARGUMENT).
+            # Send a proxy with the same timeline; timelines still link to the source.
+            proxy_path = out_dir / f"{base_name}_gemini_proxy.mp4"
+            logger.info(
+                "    [分析代理檔] 原檔 %.1f GB 超過 Gemini 上限 %.1f GB，轉出低解析度代理檔供分析: %s",
+                video_path.stat().st_size / 1024 ** 3, GEMINI_MAX_VIDEO_BYTES / 1024 ** 3, proxy_path.name,
+            )
+            gemini_video_path = make_analysis_proxy(video_path, proxy_path, total_dur)
+        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(gemini_video_path, resolved_bucket)
 
         mode_str = "Agentic Video Understanding" if args.agentic else "Static Multimodal"
         logger.info("==> 4. 調用 %s [模式: %s] 結合 Whisper 劇本進行文字剪輯與選鏡決策...", args.model, mode_str)
