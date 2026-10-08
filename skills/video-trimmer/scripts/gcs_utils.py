@@ -86,6 +86,22 @@ def compute_file_md5(filepath: Path | str) -> str:
     return h.hexdigest()
 
 
+def compute_file_sha256_and_md5(filepath: Path | str) -> tuple[str, str]:
+    """
+    Compute SHA-256 and MD5 hex digests in one read pass.
+
+    One pass halves the read time for large files on slow storage
+    (for example, Google Drive streaming drives).
+    """
+    sha = hashlib.sha256()
+    md5 = hashlib.md5()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            sha.update(chunk)
+            md5.update(chunk)
+    return sha.hexdigest(), md5.hexdigest()
+
+
 def is_gdrive_source(val: str | Path | None) -> bool:
     """Return True if val is a Google Drive URL or gdrive:// URI."""
     if not val:
@@ -418,8 +434,7 @@ def upload_file_to_gcs(
     blob = bucket.blob(destination_blob_name)
 
     try:
-        file_sha256 = compute_file_sha256(local_p)
-        file_md5 = compute_file_md5(local_p)
+        file_sha256, file_md5 = compute_file_sha256_and_md5(local_p)
         file_size = local_p.stat().st_size
     except OSError:
         file_sha256 = None
