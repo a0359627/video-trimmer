@@ -88,6 +88,19 @@ def _parse_gemini_json_text(raw_json: str) -> dict:
             cleaned = cleaned[start_idx : end_idx + 1].strip()
     try:
         return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        # Gemini sometimes appends text or a second object after the JSON ("Extra data").
+        # Keep the first complete object.
+        start_idx = cleaned.find("{")
+        if start_idx != -1:
+            try:
+                obj, _end = json.JSONDecoder().raw_decode(cleaned[start_idx:])
+                if isinstance(obj, dict):
+                    logger.warning("    [JSON 修復] Gemini 回傳含多餘內容，已取第一個完整 JSON 物件 (%s)", e.msg)
+                    return obj
+            except json.JSONDecodeError:
+                pass
+        raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
     except Exception as e:
         raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
 

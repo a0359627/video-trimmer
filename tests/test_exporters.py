@@ -339,3 +339,18 @@ class TestMediaFileUrl(unittest.TestCase):
             url = media_file_url(video)
             self.assertEqual(ET.parse(xml_path).getroot().find(".//pathurl").text, url)
             self.assertEqual(ET.parse(fcpxml_path).getroot().find(".//asset").get("src"), url)
+
+
+class TestParseGeminiJson(unittest.TestCase):
+    def test_extra_data_after_object_keeps_first_object(self):
+        from scripts.video_trimmer import _parse_gemini_json_text
+
+        raw = '{"final_edl": [{"clip_id": 1}]}\n{"final_edl": []}'
+        self.assertEqual(_parse_gemini_json_text(raw), {"final_edl": [{"clip_id": 1}]})
+
+    def test_invalid_json_still_raises(self):
+        from scripts.exceptions import VideoTrimmerError
+        from scripts.video_trimmer import _parse_gemini_json_text
+
+        with self.assertRaises(VideoTrimmerError):
+            _parse_gemini_json_text('{"final_edl": [')
