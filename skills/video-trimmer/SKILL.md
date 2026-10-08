@@ -47,6 +47,7 @@ video-trimmer/
 ├── LICENSE                           # MIT License
 ├── .env.example                      # Environment variables template for Vertex AI & GCS
 ├── setup.sh                          # 100% Native gcloud GCP provisioning script (Zero Terraform)
+├── setup_windows.ps1                 # Windows local setup (FFmpeg, gcloud, .venv, .env; no cloud changes)
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
 ├── requirements.txt                  # Python runtime dependencies
 └── tests/                            # Offline unit tests
@@ -106,6 +107,8 @@ gcloud auth application-default login
 # 3. One-click automated GCP provisioning (Creates bucket with 2-day auto-cleanup, SA, and .env):
 ./setup.sh
 ```
+
+**Windows hosts**: Use `.venv\Scripts\python.exe` (or `python`) in place of `python3`, and set `PYTHONUTF8=1` before you run the CLI so that logs are UTF-8. If an administrator already granted access to an existing project and bucket, do not run `setup.sh`. Run `setup_windows.ps1 -Project <ID> -Bucket <NAME>` to install local tools, then sign in with `gcloud auth application-default login --project=<ID>` and `gcloud auth application-default set-quota-project <ID>`.
 
 ### Step 2: Execute Primary Video Trimmer Pipeline
 

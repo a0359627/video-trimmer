@@ -13,5 +13,7 @@ mlx-whisper>=0.4.0; sys_platform == 'darwin'
 
 # For CPU / CUDA / general platforms:
 faster-whisper>=1.0.0
+# PyAV 19 removed the metadata_errors argument that faster-whisper 1.2.x uses.
+av>=11,<19
 
 

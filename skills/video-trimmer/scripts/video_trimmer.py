@@ -94,6 +94,12 @@ def _parse_gemini_json_text(raw_json: str) -> dict:
 
 def _setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
+    if sys.platform == "win32":
+        # Windows pipes use the ANSI code page (for example cp950). Replace
+        # characters that it cannot encode instead of raising "Logging error".
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(errors="replace")
     logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr)
 
 

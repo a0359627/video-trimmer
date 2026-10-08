@@ -116,6 +116,32 @@ chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
 
+### Windows 설치 및 참고 사항
+
+이 도구는 macOS에서 개발되었으며, Windows 11(Python 3.14, FFmpeg 8.1)에서 동작이 확인되었습니다.
+
+```powershell
+# FFmpeg 및 Google Cloud SDK 설치, .venv 생성, 패키지 설치 (로컬 도구만 설치, 클라우드 변경 없음)
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Project YOUR_GCP_PROJECT_ID -Bucket YOUR_BUCKET
+
+# 권한이 부여된 계정으로 ADC 로그인
+gcloud auth application-default login --project=YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project YOUR_GCP_PROJECT_ID
+
+# 실행 (로그를 cp949 대신 UTF-8로 출력하도록 PYTHONUTF8=1 권장)
+$env:PYTHONUTF8 = "1"
+.\.venv\Scripts\python.exe skills\video-trimmer\scripts\video_trimmer.py -i "C:\path\to\raw_footage.mp4"
+```
+
+| 항목 | macOS | Windows |
+| :--- | :--- | :--- |
+| Whisper 전사 | `mlx-whisper` (Metal GPU) | `faster-whisper` (CPU int8, 전체 코어 사용) |
+| 하드웨어 인코딩 | VideoToolbox | Intel QSV, NVIDIA NVENC, AMD AMF 순서로 시도 후 `libx264` |
+| Python 명령 | `python3` | `python` (또는 `.venv\Scripts\python.exe`) |
+
+- 클립이 많으면(약 150개 이상) FFmpeg 명령이 Windows 한도인 32,767자를 넘습니다. 이 경우 `-/filter_complex`로 필터 그래프를 파일에서 읽습니다(FFmpeg 7.0 이상 필요).
+- `setup.sh`는 bucket을 생성하고 IAM을 변경합니다. 관리자가 이미 권한을 부여했다면 실행하지 말고, ADC 로그인과 `.env` 작성만 하십시오.
+
 ---
 
 ## Antigravity 조작 방법 및 사용 시나리오 (Usage & Scenarios)

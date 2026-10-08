@@ -14,6 +14,7 @@ import difflib
 import logging
 import math
 import re
+import sys
 from pathlib import Path
 
 from .acoustic import calculate_clip_cps
@@ -1174,8 +1175,9 @@ def audit_edl_quality(
     if not pass_gate:
         script_flag = f' -s "{script_path}"' if script_path else ""
         remediation_reason = "; ".join(fatal_violations)
+        python_cmd = "python" if sys.platform == "win32" else "python3"
         remediation_cmd = (
-            f'python3 skills/video-trimmer/scripts/video_trimmer.py -i "{video_path}"{script_flag}'
+            f'{python_cmd} skills/video-trimmer/scripts/video_trimmer.py -i "{video_path}"{script_flag}'
         )
 
     return {

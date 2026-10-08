@@ -11,6 +11,7 @@ import hashlib
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -128,6 +129,16 @@ def parse_gdrive_url(url_or_id: str) -> dict:
     raise ValueError(f"無法解析 Google Drive 連結或 ID: {url_or_id}")
 
 
+def _gcloud_config_dir() -> str:
+    """Return the gcloud config directory (CLOUDSDK_CONFIG, %APPDATA%/gcloud on Windows, or ~/.config/gcloud)."""
+    env_dir = os.environ.get("CLOUDSDK_CONFIG")
+    if env_dir:
+        return env_dir
+    if sys.platform == "win32" and os.environ.get("APPDATA"):
+        return os.path.join(os.environ["APPDATA"], "gcloud")
+    return os.path.expanduser("~/.config/gcloud")
+
+
 def _load_gcloud_user_drive_credentials():
     """
     Attempt to load personal user Google Drive credentials (user@gmail.com) from
@@ -139,7 +150,7 @@ def _load_gcloud_user_drive_credentials():
     import google.auth
     from google.auth.transport.requests import Request as GoogleAuthRequest
 
-    gcloud_dir = os.path.expanduser("~/.config/gcloud")
+    gcloud_dir = _gcloud_config_dir()
     legacy_dir = os.path.join(gcloud_dir, "legacy_credentials")
     if not os.path.isdir(legacy_dir):
         return None

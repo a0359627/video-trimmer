@@ -130,6 +130,7 @@ video-trimmer/
 ├── LICENSE                                  # MIT License
 ├── .env.example                             # Environment variables template for Vertex AI and GCS
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
+├── setup_windows.ps1                        # Windows local setup (FFmpeg, gcloud, .venv, .env; no cloud changes)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
 └── tests/                                   # Offline unit test suite (101 tests)
@@ -181,6 +182,32 @@ cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
+
+### 4. Windows Setup & Notes
+
+The tool was built on macOS. It is verified on Windows 11 (Python 3.14, FFmpeg 8.1).
+
+```powershell
+# Install FFmpeg and Google Cloud SDK, create .venv, install packages (local tools only, no cloud changes)
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Project YOUR_GCP_PROJECT_ID -Bucket YOUR_BUCKET
+
+# Sign in to ADC with your authorized account
+gcloud auth application-default login --project=YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project YOUR_GCP_PROJECT_ID
+
+# Run (set PYTHONUTF8=1 so that logs are written as UTF-8 instead of cp950/cp1252)
+$env:PYTHONUTF8 = "1"
+.\.venv\Scripts\python.exe skills\video-trimmer\scripts\video_trimmer.py -i "C:\path\to\raw_footage.mp4"
+```
+
+| Item | macOS | Windows |
+| :--- | :--- | :--- |
+| Whisper ASR | `mlx-whisper` (Metal GPU) | `faster-whisper` (CPU int8, all cores) |
+| Hardware encoder | VideoToolbox | Intel QSV, then NVIDIA NVENC, then AMD AMF, then `libx264` |
+| Python command | `python3` | `python` (or `.venv\Scripts\python.exe`) |
+
+- With many clips (about 150 or more), the FFmpeg command is longer than the Windows limit of 32,767 characters. The renderer then moves the filtergraph to a file with `-/filter_complex` (FFmpeg 7.0 or later).
+- `setup.sh` creates a bucket and changes IAM. If an administrator already granted your access, do not run it. Sign in to ADC and write `.env` only.
 
 ---
 

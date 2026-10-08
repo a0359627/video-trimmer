@@ -128,3 +128,28 @@ class TestGCSUtils(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestGcloudConfigDir(unittest.TestCase):
+    def test_cloudsdk_config_env_has_priority(self):
+        from scripts.gcs_utils import _gcloud_config_dir
+
+        with patch.dict("os.environ", {"CLOUDSDK_CONFIG": "/custom/gcloud", "APPDATA": r"C:\AppData"}):
+            self.assertEqual(_gcloud_config_dir(), "/custom/gcloud")
+
+    def test_windows_uses_appdata(self):
+        import os
+        from scripts.gcs_utils import _gcloud_config_dir
+
+        env = {k: v for k, v in os.environ.items() if k != "CLOUDSDK_CONFIG"}
+        env["APPDATA"] = r"C:\Users\user\AppData\Roaming"
+        with patch.dict("os.environ", env, clear=True), patch("scripts.gcs_utils.sys.platform", "win32"):
+            self.assertEqual(_gcloud_config_dir(), os.path.join(env["APPDATA"], "gcloud"))
+
+    def test_posix_uses_dot_config(self):
+        import os
+        from scripts.gcs_utils import _gcloud_config_dir
+
+        env = {k: v for k, v in os.environ.items() if k != "CLOUDSDK_CONFIG"}
+        with patch.dict("os.environ", env, clear=True), patch("scripts.gcs_utils.sys.platform", "darwin"):
+            self.assertEqual(_gcloud_config_dir(), os.path.expanduser("~/.config/gcloud"))

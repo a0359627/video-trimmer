@@ -4,6 +4,7 @@ import difflib
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -390,7 +391,8 @@ def transcribe_video_whisper(
                 })
         else:
             logger.info("本地調用 faster-whisper (%s) 進行微觀字級時間戳轉錄...", model_name)
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            # Use all CPU cores. The CTranslate2 default is 4 threads.
+            model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=os.cpu_count() or 4)
             segments, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
 
             for i, s in enumerate(segments):

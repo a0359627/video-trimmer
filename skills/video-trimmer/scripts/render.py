@@ -2,7 +2,10 @@
 
 import json
 import logging
+import os
 import subprocess
+import sys
+import tempfile
 
 from .constants import CROSSFADE_DURATION_SEC
 from .exceptions import FFmpegError
@@ -13,6 +16,33 @@ logger = logging.getLogger(__name__)
 MAX_HWACCEL_INPUTS = 16
 DEFAULT_RENDER_GOP = 30
 
+# Hardware H.264 encoders that use a fixed bitrate instead of CRF.
+HW_BITRATE_ENCODERS = ("h264_videotoolbox", "h264_qsv", "h264_nvenc", "h264_amf")
+
+# Windows CreateProcess limits the command line to 32767 characters.
+# Above this length, the filtergraph moves to a file (-/filter_complex).
+WINDOWS_CMDLINE_LIMIT = 30000
+
+
+def _run(cmd):
+    """Run a command and decode its output as UTF-8 on all platforms."""
+    return subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+
+
+def _encoder_attempts():
+    """
+    Return the ordered (encoder, use_hwaccel) attempts for this platform.
+
+    macOS: VideoToolbox with hardware decode, then without, then libx264.
+    Windows: Intel QSV, NVIDIA NVENC, AMD AMF, then libx264. An unavailable
+    encoder fails at initialization, so the fallback cost is small.
+    """
+    if sys.platform == "darwin":
+        return [("h264_videotoolbox", True), ("h264_videotoolbox", False), ("libx264", False)]
+    if sys.platform == "win32":
+        return [("h264_qsv", False), ("h264_nvenc", False), ("h264_amf", False), ("libx264", False)]
+    return [("libx264", False)]
+
 
 def probe_video(video_path):
     """Probe video duration, frame dimensions, and frame rate via ffprobe."""
@@ -22,7 +52,7 @@ def probe_video(video_path):
         "-show_entries", "stream=codec_type,width,height,r_frame_rate",
         "-of", "json", str(video_path)
     ]
-    res = subprocess.run(cmd, capture_output=True, text=True)
+    res = _run(cmd)
     if res.returncode != 0:
         raise FFmpegError(f"ffprobe error: {res.stderr}")
     info = json.loads(res.stdout)
@@ -86,9 +116,9 @@ def _build_render_cmd(
         "-map", "[outv]", "-map", "[outa]",
     ])
 
-    if encoder == "h264_videotoolbox":
+    if encoder in HW_BITRATE_ENCODERS:
         cmd.extend([
-            "-c:v", "h264_videotoolbox",
+            "-c:v", encoder,
             "-b:v", "12M",
             "-g", str(gop),
             "-pix_fmt", "yuv420p",
@@ -110,36 +140,49 @@ def _build_render_cmd(
     return cmd
 
 
+def _run_ffmpeg_render(cmd):
+    """
+    Run an FFmpeg render command.
+
+    On Windows, move the filtergraph to a temporary file when the command line
+    is longer than WINDOWS_CMDLINE_LIMIT, to prevent WinError 206.
+    """
+    if sys.platform != "win32" or len(subprocess.list2cmdline(cmd)) <= WINDOWS_CMDLINE_LIMIT:
+        return _run(cmd)
+
+    idx = cmd.index("-filter_complex")
+    fd, graph_path = tempfile.mkstemp(suffix="_filtergraph.txt")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(cmd[idx + 1])
+        script_cmd = cmd[:idx] + ["-/filter_complex", graph_path] + cmd[idx + 2:]
+        return _run(script_cmd)
+    finally:
+        os.remove(graph_path)
+
+
 def render_cut_video(edl, video_path, out_mp4_path, crf=18):
-    """Render the trimmed MP4 with keyframe input seeking, 1s GOP, and VideoToolbox acceleration."""
+    """Render the trimmed MP4 with keyframe input seeking, 1s GOP, and platform hardware encoding."""
     n = len(edl)
     if n == 0:
         logger.warning("No selected clips available for rendering.")
         return
 
-    # 1. Try Apple Silicon VideoToolbox hardware encoding + hardware decoding
-    cmd = _build_render_cmd(
-        edl, video_path, out_mp4_path, crf=crf,
-        encoder="h264_videotoolbox", use_hwaccel=True,
-    )
-    proc = subprocess.run(cmd, capture_output=True, text=True)
-
-    # 2. Retry VideoToolbox encoder without per-input hwaccel if input hwaccel failed
-    if proc.returncode != 0 and n <= MAX_HWACCEL_INPUTS:
+    proc = None
+    tried_cmds = []
+    for encoder, use_hwaccel in _encoder_attempts():
         cmd = _build_render_cmd(
             edl, video_path, out_mp4_path, crf=crf,
-            encoder="h264_videotoolbox", use_hwaccel=False,
+            encoder=encoder, use_hwaccel=use_hwaccel,
         )
-        proc = subprocess.run(cmd, capture_output=True, text=True)
+        # Above MAX_HWACCEL_INPUTS, hwaccel is off, so two attempts can build the same command.
+        if cmd in tried_cmds:
+            continue
+        tried_cmds.append(cmd)
+        proc = _run_ffmpeg_render(cmd)
+        if proc.returncode == 0:
+            logger.info("FFmpeg render encoder: %s", encoder)
+            return
+        logger.debug("FFmpeg encoder %s failed, trying next fallback.", encoder)
 
-    # 3. Fallback to software libx264 encoder if VideoToolbox is unavailable
-    if proc.returncode != 0:
-        cmd = _build_render_cmd(
-            edl, video_path, out_mp4_path, crf=crf,
-            encoder="libx264", use_hwaccel=False,
-        )
-        proc = subprocess.run(cmd, capture_output=True, text=True)
-
-    if proc.returncode != 0:
-        raise FFmpegError(f"FFmpeg render failed: {proc.stderr}")
-
+    raise FFmpegError(f"FFmpeg render failed: {proc.stderr}")

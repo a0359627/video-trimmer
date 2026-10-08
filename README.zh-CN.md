@@ -116,6 +116,32 @@ chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
 
+### Windows 安装与注意事项
+
+本工具原在 macOS 上开发，已在 Windows 11（Python 3.14、FFmpeg 8.1）验证可运行。
+
+```powershell
+# 安装 FFmpeg 与 Google Cloud SDK、创建 .venv 并安装依赖（仅安装本机工具，不更改任何云端资源）
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Project YOUR_GCP_PROJECT_ID -Bucket YOUR_BUCKET
+
+# 使用已授权账号登录 ADC
+gcloud auth application-default login --project=YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project YOUR_GCP_PROJECT_ID
+
+# 运行（建议设置 PYTHONUTF8=1，使日志以 UTF-8 输出而非系统代码页）
+$env:PYTHONUTF8 = "1"
+.\.venv\Scripts\python.exe skills\video-trimmer\scripts\video_trimmer.py -i "C:\path\to\raw_footage.mp4"
+```
+
+| 项目 | macOS | Windows |
+| :--- | :--- | :--- |
+| Whisper 转录 | `mlx-whisper`（Metal GPU） | `faster-whisper`（CPU int8，使用全部核心） |
+| 硬件编码 | VideoToolbox | 依次尝试 Intel QSV、NVIDIA NVENC、AMD AMF，最后 `libx264` |
+| Python 命令 | `python3` | `python`（或 `.venv\Scripts\python.exe`） |
+
+- 片段很多时（约 150 段以上），FFmpeg 命令会超过 Windows 32,767 字符上限，此时会自动改用 `-/filter_complex` 从文件读取滤镜图（需 FFmpeg 7.0 以上）。
+- `setup.sh` 会创建 bucket 并更改 IAM。若管理员已开通权限，请勿运行，只需登录 ADC 并写好 `.env`。
+
 ---
 
 ## Antigravity 操作方式与使用场景 (Usage & Scenarios)

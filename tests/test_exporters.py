@@ -149,11 +149,54 @@ class TestRenderCutVideo(unittest.TestCase):
 
         fail_proc = MagicMock(returncode=1, stderr="vt failed")
         ok_proc = MagicMock(returncode=0, stderr="")
-        with patch("scripts.render.subprocess.run", side_effect=[fail_proc, fail_proc, ok_proc]) as mock_run:
+        with patch("scripts.render.sys.platform", "darwin"), \
+                patch("scripts.render.subprocess.run", side_effect=[fail_proc, fail_proc, ok_proc]) as mock_run:
             render_cut_video(_sample_edl(), "raw_footage.mp4", "out_trimmed.mp4", crf=20)
             self.assertEqual(mock_run.call_count, 3)
             final_cmd = " ".join(mock_run.call_args_list[2][0][0])
             self.assertIn("-c:v libx264 -preset fast -crf 20 -g 30", final_cmd)
+
+    def test_render_cut_video_windows_tries_qsv_nvenc_amf_then_libx264(self):
+        from unittest.mock import MagicMock, patch
+        from scripts.render import render_cut_video
+
+        fail_proc = MagicMock(returncode=1, stderr="encoder unavailable")
+        ok_proc = MagicMock(returncode=0, stderr="")
+        with patch("scripts.render.sys.platform", "win32"), \
+                patch("scripts.render.subprocess.run",
+                      side_effect=[fail_proc, fail_proc, fail_proc, ok_proc]) as mock_run:
+            render_cut_video(_sample_edl(), "raw_footage.mp4", "out_trimmed.mp4", crf=20)
+            cmds = [" ".join(call[0][0]) for call in mock_run.call_args_list]
+            self.assertIn("-c:v h264_qsv -b:v 12M -g 30", cmds[0])
+            self.assertIn("-c:v h264_nvenc", cmds[1])
+            self.assertIn("-c:v h264_amf", cmds[2])
+            self.assertIn("-c:v libx264 -preset fast -crf 20 -g 30", cmds[3])
+            self.assertNotIn("videotoolbox", " ".join(cmds))
+
+    def test_windows_long_command_moves_filtergraph_to_file(self):
+        from unittest.mock import MagicMock, patch
+        from scripts.render import WINDOWS_CMDLINE_LIMIT, render_cut_video
+
+        edl = [
+            {"clip_id": i, "topic": "A", "source_in": i * 2.0, "source_out": i * 2.0 + 1.0, "duration": 1.0}
+            for i in range(400)
+        ]
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            graph_path = cmd[cmd.index("-/filter_complex") + 1]
+            seen["graph"] = Path(graph_path).read_text(encoding="utf-8")
+            return MagicMock(returncode=0, stderr="")
+
+        with patch("scripts.render.sys.platform", "win32"), \
+                patch("scripts.render.subprocess.run", side_effect=fake_run):
+            render_cut_video(edl, "raw_footage.mp4", "out_trimmed.mp4", crf=20)
+
+        self.assertNotIn("-filter_complex", seen["cmd"])
+        self.assertIn("concat=n=400", seen["graph"])
+        import subprocess as _sp
+        self.assertLessEqual(len(_sp.list2cmdline(seen["cmd"])), WINDOWS_CMDLINE_LIMIT)
 
     def test_real_ffmpeg_filtergraph_execution(self):
         import shutil
