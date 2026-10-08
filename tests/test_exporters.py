@@ -354,3 +354,45 @@ class TestParseGeminiJson(unittest.TestCase):
 
         with self.assertRaises(VideoTrimmerError):
             _parse_gemini_json_text('{"final_edl": [')
+
+
+class TestFcp7XmlPremiereStructure(unittest.TestCase):
+    def _build(self, fps=29.97, topic="A & B <test>"):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        video = Path(tmp.name) / "raw_footage.mp4"
+        video.write_bytes(b"")
+        xml_path = Path(tmp.name) / "out.xml"
+        edl = _sample_edl()
+        edl[0] = dict(edl[0], topic=topic)
+        generate_fcp7_xml(edl, video, 30.0, xml_path, 3840, 2160, fps)
+        return ET.parse(xml_path).getroot(), edl
+
+    def test_file_defined_once_with_media_characteristics(self):
+        root, edl = self._build()
+        files = root.findall(".//file")
+        full = [f for f in files if f.find("pathurl") is not None]
+        self.assertEqual(len(full), 1)
+        self.assertEqual(len(files), len(edl) * 2)
+        self.assertEqual(full[0].find("media/video/samplecharacteristics/width").text, "3840")
+        self.assertEqual(full[0].find("media/audio/channelcount").text, "2")
+
+    def test_audio_clips_have_source_track_and_links(self):
+        root, edl = self._build()
+        audio_clips = root.findall("./sequence/media/audio/track/clipitem")
+        self.assertEqual(len(audio_clips), len(edl))
+        for clip in audio_clips:
+            self.assertEqual(clip.find("sourcetrack/mediatype").text, "audio")
+            self.assertEqual(len(clip.findall("link")), 2)
+        self.assertEqual(root.find("./sequence/duration").text,
+                         str(sum(int(c.find("end").text) - int(c.find("start").text) for c in audio_clips)))
+
+    def test_names_are_escaped(self):
+        root, _ = self._build(topic="A & B <test>")
+        self.assertIn("A & B <test>", root.find(".//clipitem/name").text)
+
+    def test_ntsc_flag_follows_frame_rate(self):
+        root, _ = self._build(fps=29.97)
+        self.assertEqual(root.find("./sequence/rate/ntsc").text, "TRUE")
+        root, _ = self._build(fps=25.0)
+        self.assertEqual(root.find("./sequence/rate/ntsc").text, "FALSE")
