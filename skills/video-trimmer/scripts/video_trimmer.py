@@ -493,9 +493,12 @@ def _run(args):
     logger.info("==> 9. 輸出 Final Cut Pro X 工程檔: %s", fcpxml_path.name)
 
     out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
-    logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
-    render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
-    logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
+    if args.skip_render:
+        logger.info("==> 10. 跳過 FFmpeg 渲染成片 (--skip-render)，僅輸出時間軸與報告。")
+    else:
+        logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
+        render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
+        logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
 
     if args.strict and not verdict["pass_quality_gate"]:
         logger.error("==> [嚴格品質閘門未通過] %s", "; ".join(verdict["fatal_violations"]))
@@ -523,6 +526,7 @@ def main():
     parser.add_argument("--cached-json", default=None,
                         help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析")
     parser.add_argument("--skip-whisper", action="store_true", help="跳過本地 Whisper 轉錄，僅使用純能量檢測")
+    parser.add_argument("--skip-render", action="store_true", help="不渲染粗剪 MP4，僅輸出 XML/FCPXML/EDL/CSV 時間軸與審計報告")
     parser.add_argument("--strict", action="store_true", help="啟用嚴格品質閘門 (若 agent_verdict.pass_quality_gate 為 false 則於輸出報告後以 exit code 2 結束)")
     parser.add_argument("--verbose", action="store_true", help="輸出詳細除錯訊息 (DEBUG level)")
     args = parser.parse_args()

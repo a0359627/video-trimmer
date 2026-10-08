@@ -158,6 +158,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
+| `--skip-render`| | `False` | Do not render the trimmed MP4. Write only the timelines (`.xml`, `.fcpxml`, `.edl`, `.csv`) and audit reports. |
 | `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
 
