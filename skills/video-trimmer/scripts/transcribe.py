@@ -4,6 +4,7 @@ import difflib
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 from pathlib import Path
@@ -389,9 +390,25 @@ def transcribe_video_whisper(
                     "words": words_data
                 })
         else:
-            logger.info("本地調用 faster-whisper (%s) 進行微觀字級時間戳轉錄...", model_name)
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
-            segments, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
+            # faster-whisper (Windows / Linux)：預設改用 large-v3 以維持中文辨識品質，
+            # 可用環境變數 WHISPER_MODEL 覆寫；有 NVIDIA GPU 時走 CUDA float16，失敗自動退回 CPU int8。
+            fw_model = os.environ.get("WHISPER_MODEL") or "large-v3"
+            fw_device = os.environ.get("WHISPER_DEVICE") or "auto"
+            segments = None
+            attempts = [("cuda", "float16"), ("cpu", "int8")] if fw_device in ("auto", "cuda") else [("cpu", "int8")]
+            last_err = None
+            for dev, ctype in attempts:
+                try:
+                    logger.info("本地調用 faster-whisper (%s, %s/%s) 進行微觀字級時間戳轉錄...", fw_model, dev, ctype)
+                    model = WhisperModel(fw_model, device=dev, compute_type=ctype)
+                    seg_iter, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
+                    segments = list(seg_iter)  # 在此強制執行，CUDA DLL 缺失等錯誤會在這裡拋出
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    logger.warning("faster-whisper 以 %s 執行失敗：%s", dev, e)
+            if segments is None:
+                raise RuntimeError(f"faster-whisper 轉錄失敗：{last_err}")
 
             for i, s in enumerate(segments):
                 words_data = []
