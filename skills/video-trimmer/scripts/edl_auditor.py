@@ -1003,12 +1003,16 @@ def audit_edl_quality(
     allow_reorder: bool = False,
     mode_label: str | None = None,
     extra_cli_flags: str = "",
+    repeats_as_warnings: bool = False,
 ) -> dict:
     """
     Execute an 8-dimension rough-cut quality audit and compute the top-level agent_verdict.
 
     allow_reorder: Show Mode. Out-of-order clips become a warning instead of a fatal violation;
     overlaps are still checked in source order.
+    repeats_as_warnings: Show Mode. Intra-clip repeated clauses are reported as warnings, because
+    the show prompt protects rhetorical repetition ("A, 還是 A", doubled phrases) and the model
+    already re-checked them in the micro-window repair pass; the editor reviews them by hand.
 
     ASD-STE100:
     Evaluate Whisper lock rate, timeline monotonicity, retake hygiene, script coverage,
@@ -1129,7 +1133,13 @@ def audit_edl_quality(
         fatal_violations.append(f"Detected {len(residual_retake_pairs)} residual retake pair(s) ({pair_desc}){err_tag}.")
     if intra_clip_repeats:
         rep_desc = ", ".join(f"Clip {r['clip_id']} ('{r['repeated_phrase']}')" for r in intra_clip_repeats[:3])
-        fatal_violations.append(f"Detected {len(intra_clip_repeats)} intra-clip repeat(s) ({rep_desc}) [ERR_INTRA_CLIP_REPEAT].")
+        if repeats_as_warnings:
+            warnings.append(
+                f"Detected {len(intra_clip_repeats)} intra-clip repeated clause(s) ({rep_desc}); "
+                "kept as possible rhetorical repetition (--repeats-as-warnings), please review."
+            )
+        else:
+            fatal_violations.append(f"Detected {len(intra_clip_repeats)} intra-clip repeat(s) ({rep_desc}) [ERR_INTRA_CLIP_REPEAT].")
     if off_screen_clip_ids:
         fatal_violations.append(f"Detected off-screen speaker audio in Clip(s) {off_screen_clip_ids}.")
 
@@ -1266,9 +1276,10 @@ def audit_edl_quality(
                 "intra_clip_repeat_count": len(intra_clip_repeats),
                 "intra_clip_repeats": intra_clip_repeats,
                 "off_screen_speaker_clip_count": len(off_screen_clip_ids),
+                "repeats_as_warnings": repeats_as_warnings,
                 "pass": (
                     len(residual_retake_pairs) == 0
-                    and len(intra_clip_repeats) == 0
+                    and (repeats_as_warnings or len(intra_clip_repeats) == 0)
                     and len(off_screen_clip_ids) == 0
                 ),
             },

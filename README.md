@@ -256,6 +256,7 @@ Use Show Mode when the director performs the script's voice role (questions, rea
 | `--allow-reorder` | Keep the assembled order; out-of-order clips become a warning. |
 | `--analysis-video` | Upload and analyse a proxy (e.g. 1080p) while Whisper, acoustic locking and XML use the original. |
 | `--xml-only` | Skip the MP4 render. |
+| `--repeats-as-warnings` | Intra-clip repeated clauses (rhetorical parallels, doubled phrases) become warnings instead of a fatal violation. |
 | `--transcribe-only` | Transcription and role tagging only, to inspect the footage first. |
 
 ```bash

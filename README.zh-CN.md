@@ -199,6 +199,7 @@ chmod +x setup.sh
 | `--allow-reorder` | 允许成片顺序与原片不同；顺序颠倒改为警告。 |
 | `--analysis-video` | 上传与分析用代理文件（如 1080p），Whisper、声学锁定与 XML 仍以原文件为准。 |
 | `--xml-only` | 不渲染 MP4。 |
+| `--repeats-as-warnings` | 句内重复字句（排比、刻意重复）改列为警告而非 fatal。 |
 | `--transcribe-only` | 只做转录与角色标记。 |
 
 ```bash

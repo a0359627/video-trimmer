@@ -178,13 +178,56 @@ def normalize_assembled_edl(assembled: dict, whisper_units: list[dict], chunk_re
         c["clip_id"] = i
         c["timeline_position"] = i
 
+    model_dropped = assembled.get("dropped", []) if isinstance(assembled, dict) else []
+    unaccounted = find_unaccounted_sentences(kept, model_dropped, whisper_units)
+    if unaccounted:
+        logger.warning(
+            "    [全片組裝] %d 句主持人正式長句既未入選也未列在 dropped，請人工確認是否遺漏: %s",
+            len(unaccounted), ", ".join(f"S{u['id']}@{u['start']:.1f}s" for u in unaccounted[:12]),
+        )
+
     out = {
         "project_title": assembled.get("project_title", "Show Mode 全片組裝") if isinstance(assembled, dict) else "Show Mode 全片組裝",
         "pacing_style": "text_based_whisper_grounded",
         "final_edl": kept,
         "assembly_notes": assembled.get("notes", "") if isinstance(assembled, dict) else "",
-        "assembly_dropped": (assembled.get("dropped", []) if isinstance(assembled, dict) else []) + dropped,
+        "assembly_dropped": list(model_dropped) + dropped,
+        "assembly_unaccounted": unaccounted,
     }
+    return out
+
+
+def find_unaccounted_sentences(
+    final_edl: list[dict],
+    dropped: list[dict],
+    whisper_units: list[dict],
+    min_duration: float = 3.0,
+) -> list[dict]:
+    """HOST sentences longer than min_duration that are neither selected nor explicitly dropped.
+
+    The assembly model sometimes omits a sentence silently (no entry in `dropped`); such
+    omissions are content losses until a human confirms them, so they are surfaced here.
+    """
+    selected: set[int] = set()
+    for c in final_edl:
+        selected.update(int(x) for x in (c.get("sentence_ids") or []) if str(x).isdigit())
+    explicit: set[int] = set()
+    for d in dropped or []:
+        explicit.update(int(x) for x in (d.get("sentence_ids") or []) if str(x).isdigit())
+    out = []
+    for u in whisper_units:
+        uid = int(u.get("id", 0))
+        if uid in selected or uid in explicit:
+            continue
+        if u.get("speaker_id") not in (None, "HOST", "SPEAKER_00"):
+            continue
+        if not u.get("is_target_speaker", True):
+            continue
+        dur = float(u.get("end", 0.0)) - float(u.get("start", 0.0))
+        if dur < min_duration:
+            continue
+        out.append({"id": uid, "start": round(float(u.get("start", 0.0)), 2), "end": round(float(u.get("end", 0.0)), 2),
+                    "text": str(u.get("text", ""))[:80]})
     return out
 
 

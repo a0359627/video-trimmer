@@ -199,6 +199,7 @@ Antigravity では、以下の 2 つの方法で **Video Trimmer** を操作で�
 | `--allow-reorder` | アセンブリ順を維持。順序の入れ替わりは警告扱い。 |
 | `--analysis-video` | アップロードと解析にプロキシ（例：1080p）を使用。Whisper、音響ロック、XML は元ファイル基準。 |
 | `--xml-only` | MP4 をレンダリングしない。 |
+| `--repeats-as-warnings` | クリップ内の反復表現（対句・意図的な繰り返し）を fatal ではなく警告として扱う。 |
 | `--transcribe-only` | 文字起こしと役タグ付けのみ。 |
 
 ```bash

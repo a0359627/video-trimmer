@@ -164,6 +164,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--assemble` | | `False` | Show Mode: text-only global assembly pass after chunk inference (cross-chunk take arbitration, segment labels, timeline order). |
 | `--allow-reorder` | | `False` | Keep `timeline_position` order; out-of-order clips become a warning instead of a fatal violation. |
 | `--xml-only` | | `False` | Skip the MP4 render; still writes JSON, CSV, XML, FCPXML and the audit report. |
+| `--repeats-as-warnings` | | `False` | Show Mode: intra-clip repeated clauses (rhetorical "A, 還是 A", doubled phrases) are warnings instead of a fatal violation. |
 | `--transcribe-only` | | `False` | Stop after Whisper transcription and sentence merging (with role tags); no upload, no Gemini call. |
 
 ### Show Mode (host + off-screen voice role on a second microphone)

@@ -522,6 +522,8 @@ def _run(args):
         show_mode_flags.append("--allow-reorder")
     if getattr(args, "xml_only", False):
         show_mode_flags.append("--xml-only")
+    if getattr(args, "repeats_as_warnings", False):
+        show_mode_flags.append("--repeats-as-warnings")
 
     audit_report = audit_edl_quality(
         refined_edl=refined_edl,
@@ -535,6 +537,7 @@ def _run(args):
         allow_reorder=allow_reorder,
         mode_label=("Mode C (Script Reference, Show Mode)" if reference_script_text is not None else None),
         extra_cli_flags=" ".join(show_mode_flags),
+        repeats_as_warnings=bool(getattr(args, "repeats_as_warnings", False)),
     )
     report_json_path = out_dir / f"{base_name}_{tag}_edl_report.json"
     report_md_path = out_dir / f"{base_name}_{tag}_edl_report.md"
@@ -625,6 +628,8 @@ def main():
     show.add_argument("--allow-reorder", action="store_true",
                       help="允許成片順序與原片時間順序不同（依 timeline_position），順序顛倒改為警告而非 fatal")
     show.add_argument("--xml-only", action="store_true", help="只輸出 JSON/CSV/XML/FCPXML 與審計報告，不渲染 MP4")
+    show.add_argument("--repeats-as-warnings", action="store_true",
+                      help="句內重複字句改列為警告而非 fatal（節目型拍帶常有刻意排比與重複，模型已在局部重掃確認）")
     show.add_argument("--transcribe-only", action="store_true",
                       help="只做 Whisper 轉錄與句子合併（含角色標籤）後結束，不上傳也不呼叫 Gemini")
     args = parser.parse_args()

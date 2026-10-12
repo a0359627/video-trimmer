@@ -199,6 +199,7 @@ Antigravity에서는 다음 두 가지 방식으로 **Video Trimmer**를 사용�
 | `--allow-reorder` | 조립 순서 유지. 순서 역전은 경고로만 처리. |
 | `--analysis-video` | 업로드와 분석에 프록시(예: 1080p) 사용. Whisper, 음향 고정, XML은 원본 기준. |
 | `--xml-only` | MP4 렌더링 생략. |
+| `--repeats-as-warnings` | 클립 내 반복 구절(대구, 의도적 반복)을 fatal 대신 경고로 처리. |
 | `--transcribe-only` | 전사와 역할 태깅만 수행. |
 
 ```bash

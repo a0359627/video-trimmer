@@ -180,6 +180,20 @@ class TestReorderSupport(unittest.TestCase):
         assert lenient["summary"]["mode"].startswith("Mode C")
         assert lenient["dimensions"]["2_timeline_integrity"]["reorder_allowed"] is True
 
+    def test_audit_repeats_as_warnings_downgrades_intra_clip_repeat(self):
+        units = [{"id": 2, "start": 10.0, "end": 15.0, "text": "你會覺得它是惡作劇還是你會覺得它是個天才呢", "words": [],
+                  "is_target_speaker": True}]
+        clips = [{"clip_id": 1, "topic": "A", "source_in": 10.0, "source_out": 15.0, "duration": 5.0, "t_last": 14.8,
+                  "sentence_ids": [2], "transcript": "你會覺得它是惡作劇還是你會覺得它是個天才呢", "cps": 4.0,
+                  "in_margin": 0.1, "out_margin": 0.1}]
+        strict = audit_edl_quality(clips, units, 60.0, Path("x.mp4"))
+        lenient = audit_edl_quality(clips, units, 60.0, Path("x.mp4"), repeats_as_warnings=True)
+        if strict["dimensions"]["3_retake_and_speaker_hygiene"]["intra_clip_repeat_count"]:
+            assert strict["agent_verdict"]["pass_quality_gate"] is False
+            assert lenient["agent_verdict"]["pass_quality_gate"] is True
+            assert any("rhetorical" in w for w in lenient["agent_verdict"]["warnings"])
+        assert lenient["dimensions"]["3_retake_and_speaker_hygiene"]["repeats_as_warnings"] is True
+
     def test_audit_remediation_cmd_carries_show_mode_flags(self):
         units = [{"id": 2, "start": 10.0, "end": 15.0, "text": "第一段內容", "words": [], "is_target_speaker": True}]
         clips = [{"clip_id": 1, "topic": "A", "source_in": 10.0, "source_out": 11.0, "duration": 1.0, "t_last": 14.8,
@@ -236,6 +250,21 @@ class TestAssembly(unittest.TestCase):
         assert edl[0]["visual_check"] == "未經視覺確認"
         reasons = [d["reason"] for d in out["assembly_dropped"]]
         assert "cue-only sentences" in reasons and "no valid sentence_ids" in reasons
+
+    def test_unaccounted_long_host_sentences_are_surfaced(self):
+        from scripts.assembly import find_unaccounted_sentences
+
+        units = [
+            {"id": 1, "start": 0.0, "end": 5.0, "text": "選入的句子", "speaker_id": "HOST", "is_target_speaker": True},
+            {"id": 2, "start": 6.0, "end": 12.0, "text": "明確剔除的句子", "speaker_id": "HOST", "is_target_speaker": True},
+            {"id": 3, "start": 13.0, "end": 20.0, "text": "被默默遺漏的長句", "speaker_id": "HOST", "is_target_speaker": True},
+            {"id": 4, "start": 21.0, "end": 22.0, "text": "短句", "speaker_id": "HOST", "is_target_speaker": True},
+            {"id": 5, "start": 23.0, "end": 30.0, "text": "場外長句", "speaker_id": "OFFSCREEN", "is_target_speaker": True},
+        ]
+        out = find_unaccounted_sentences([{"sentence_ids": [1]}], [{"sentence_ids": [2]}], units)
+        assert [u["id"] for u in out] == [3]
+        normalized = normalize_assembled_edl({"final_edl": [{"sentence_ids": [1]}], "dropped": [{"sentence_ids": [2]}]}, units, [])
+        assert [u["id"] for u in normalized["assembly_unaccounted"]] == [3]
 
     def test_parse_assembly_json_tolerates_fences(self):
         raw = "```json\n{\"final_edl\": [], \"notes\": \"n\"}\n```"
