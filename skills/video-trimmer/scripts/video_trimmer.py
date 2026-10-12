@@ -430,9 +430,16 @@ def _run(args):
             keep_order=allow_reorder,
         )
 
+    # Show Mode 節奏參數：想法內部的停頓可以保留（keep_pause），想法結束後多留一點尾音（tail_pad）
+    keep_pause = float(getattr(args, "keep_pause_sec", 0.40) or 0.40)
+    tail_pad = float(getattr(args, "tail_pad_sec", 0.0) or 0.0)
+
     expanded_units = []
     for c in model_edl.get("final_edl", []):
-        sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
+        sub_units = resolve_clip_sub_units(
+            whisper_units, c, total_dur,
+            max_internal_gap=keep_pause, max_word_gap=max(0.45, keep_pause),
+        )
         base_topic = str(c.get("topic", ""))
         if str(c.get("role", "host")).lower() == "offscreen":
             base_topic = f"[場外] {base_topic}"
@@ -452,8 +459,8 @@ def _run(args):
                 "trimmed_tail": su.get("trimmed_tail", False),
             })
 
-    # Coalesce adjacent continuous sub-units across clip boundaries when gap < 0.40s and no ID is skipped
-    filtered_units = coalesce_adjacent_sub_units(expanded_units)
+    # Coalesce adjacent continuous sub-units across clip boundaries when gap < keep_pause and no ID is skipped
+    filtered_units = coalesce_adjacent_sub_units(expanded_units, max_internal_gap=keep_pause)
 
     # 5c. 針對每個保留子片段獨立執行聲學包絡收緊與微呼吸邊界鎖定
     refined_edl = []
@@ -471,6 +478,12 @@ def _run(args):
         )
         if tight_out <= tight_in:
             tight_out = tight_in + 1.0
+        if tail_pad > 0.0:
+            # 讓想法落地：想法結束後多留一點尾音與停頓，但不跨進下一句的開口
+            limit = total_dur
+            if next_sentence_start is not None:
+                limit = min(limit, float(next_sentence_start) - 0.02)
+            tight_out = round(max(tight_out, min(limit, tight_out + tail_pad)), 2)
         dur = round(tight_out - tight_in, 2)
 
         refined_edl.append({
@@ -630,6 +643,10 @@ def main():
     show.add_argument("--xml-only", action="store_true", help="只輸出 JSON/CSV/XML/FCPXML 與審計報告，不渲染 MP4")
     show.add_argument("--repeats-as-warnings", action="store_true",
                       help="句內重複字句改列為警告而非 fatal（節目型拍帶常有刻意排比與重複，模型已在局部重掃確認）")
+    show.add_argument("--keep-pause-sec", type=float, default=0.40,
+                      help="想法內部可保留的停頓上限（秒）；小於此值的停頓不切開、連續句子合併成一個 clip。預設 0.40，節目型建議 1.0")
+    show.add_argument("--tail-pad-sec", type=float, default=0.0,
+                      help="每個 clip 尾字之後多留的時間（秒），讓想法落地；不會跨進下一句開口。預設 0，節目型建議 0.25")
     show.add_argument("--transcribe-only", action="store_true",
                       help="只做 Whisper 轉錄與句子合併（含角色標籤）後結束，不上傳也不呼叫 Gemini")
     args = parser.parse_args()

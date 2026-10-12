@@ -210,6 +210,51 @@ def load_json(p: Path) -> dict:
     return json.loads(Path(p).read_text(encoding="utf-8"))
 
 
+def build_clip_exact_readthrough(edl: list[dict], cut_segments: list[dict], fps: float) -> str:
+    """Read-through text with one line per clip and a ‖ mark at every cut.
+
+    Words from the re-transcribed cut audio are assigned to the clip that contains the
+    word's midpoint, so the text on each line is what the viewer hears inside that clip.
+    Whisper timestamps on the cut can be a few hundred milliseconds early, so a word that
+    straddles a boundary may land on the earlier line; the ‖ marks still show the cut.
+    """
+    layout = timeline_layout(edl, fps)
+
+    def clip_at(t: float) -> dict:
+        f = int(round(t * fps))
+        for p in layout:
+            if p["start_f"] <= f < p["end_f"]:
+                return p
+        return layout[-1]
+
+    words: list[tuple[float, float, str]] = []
+    for seg in cut_segments:
+        ws = seg.get("words") or [{"word": seg.get("text", ""), "start": seg.get("start", 0.0), "end": seg.get("end", 0.0)}]
+        for w in ws:
+            words.append((float(w.get("start", 0.0)), float(w.get("end", 0.0)), str(w.get("word", ""))))
+
+    lines = ["說明：每行是成片中的一個 clip；‖ 代表剪接點。文字來自成片音軌重新轉錄，字在哪個 clip 以字的中點時間判定。"]
+    cur = None
+    buf: list[str] = []
+
+    def flush():
+        if cur is not None:
+            lines.append(
+                f"[clip {cur['clip_id']:2d} | 成片 {tc(cur['start_f'] / fps, fps)} | 原片 {tc(cur['in_f'] / fps, fps)}-{tc(cur['out_f'] / fps, fps)}] "
+                + "".join(buf).strip() + " ‖"
+            )
+
+    for ws, we, w in words:
+        p = clip_at((ws + we) / 2.0)
+        if cur is None or p["clip_id"] != cur["clip_id"]:
+            flush()
+            cur = p
+            buf = []
+        buf.append(w)
+    flush()
+    return "\n".join(lines) + "\n"
+
+
 def build_readthrough_review_prompt(prompt_path: Path, readthrough_text: str, edl: list[dict],
                                     sentences: list[dict], fps: float) -> str:
     """Assemble the Gemini read-through review prompt (text only)."""
@@ -301,7 +346,9 @@ def main(argv=None) -> int:
     parser.add_argument("--video", required=True, help="原片路徑（XML 連結的檔案）")
     parser.add_argument("--out-dir", required=True)
     parser.add_argument("--fps", type=float, default=24000 / 1001)
-    parser.add_argument("--readthrough", default=None, help="已產生的通讀稿 .txt；省略則不做 Gemini 評讀")
+    parser.add_argument("--readthrough", default=None, help="已產生的通讀稿 .txt；省略則不做 Gemini 評讀（除非加 --render）")
+    parser.add_argument("--render", action="store_true",
+                        help="輸出成片音軌（WAV 與 MP3）、用 Whisper 重新轉錄、產生以 clip 為單位對齊的通讀稿")
     parser.add_argument("--gemini", action="store_true", help="執行 Gemini 連貫性評讀（純文字，不上傳影片）")
     parser.add_argument("--model", default=None)
     parser.add_argument("--xml-out", default=None, help="寫出帶 marker 的 FCP7 XML")
@@ -318,9 +365,24 @@ def main(argv=None) -> int:
     records = analyze_seams(edl, sentences, fps)
     markers = records_to_markers(records)
     review = None
-    if args.gemini and args.readthrough:
+
+    readthrough_text = Path(args.readthrough).read_text(encoding="utf-8") if args.readthrough else None
+    if args.render:
+        from .transcribe import transcribe_video_whisper
+
+        stem = Path(args.edl_json).stem.replace("_edl", "")
+        wav = out_dir / f"{stem}_cut.wav"
+        mp3 = out_dir / f"{stem}_cut.mp3"
+        render_cut_audio(edl, Path(args.video), wav, mp3, fps)
+        logger.info("成片音軌: %s", mp3)
+        cut_raw, _cut_sents = transcribe_video_whisper(wav, out_dir / f"{stem}_cut_whisper_raw.json", model_name="large-v3")
+        readthrough_text = build_clip_exact_readthrough(edl, cut_raw, fps)
+        (out_dir / f"{stem}_cut_readthrough.txt").write_text(readthrough_text, encoding="utf-8")
+        logger.info("通讀稿: %s", out_dir / f"{stem}_cut_readthrough.txt")
+
+    if args.gemini and readthrough_text:
         prompt_path = Path(__file__).parent.parent / "prompts" / "cut_review_prompt.md"
-        prompt = build_readthrough_review_prompt(prompt_path, Path(args.readthrough).read_text(encoding="utf-8"), edl, sentences, fps)
+        prompt = build_readthrough_review_prompt(prompt_path, readthrough_text, edl, sentences, fps)
         model = args.model or __import__("os").environ.get("MODEL_NAME") or "gemini-3.8-flash"
         review, usage, secs = run_readthrough_review(prompt, model)
         (out_dir / "cut_review_gemini.json").write_text(json.dumps(review, ensure_ascii=False, indent=2), encoding="utf-8")
