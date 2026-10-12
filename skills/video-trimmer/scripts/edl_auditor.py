@@ -424,6 +424,7 @@ def deduplicate_and_sort_clips(
     clips: list[dict],
     whisper_units: list[dict],
     script_text: str | None = None,
+    keep_order: bool = False,
 ) -> list[dict]:
     """
     Sort clips chronologically and enforce Single-Winner (Last-Take-Wins) deduplication.
@@ -432,11 +433,36 @@ def deduplicate_and_sort_clips(
     1. Sort all clips by their physical start time.
     2. When two clips share sentence IDs, overlap in physical time, or collide on the same
        Mode A script block (coverage >= 0.45 with shared clause), retain only the later clip.
+    3. With keep_order=True (Show Mode with --allow-reorder) the given timeline order is kept:
+       a clip that shares sentence IDs or physical time with an earlier kept clip is dropped,
+       and no script-block arbitration is applied.
     """
     if not clips:
         return []
 
     unit_by_id = {int(u["id"]): u for u in whisper_units if "id" in u}
+
+    if keep_order:
+        kept_ordered: list[dict] = []
+        kept_bounds: list[tuple[set[int], float, float]] = []
+        for raw in clips:
+            curr = dict(raw)
+            curr_sids = set(_resolve_clip_sentence_ids(curr, whisper_units))
+            curr_in, curr_out = _clip_time_bounds(curr, unit_by_id, whisper_units)
+            duplicate = False
+            for prev_sids, prev_in, prev_out in kept_bounds:
+                shares_sids = bool(curr_sids and prev_sids and curr_sids.intersection(prev_sids))
+                time_overlaps = (curr_in < prev_out - 0.05) and (curr_out > prev_in + 0.05)
+                if shares_sids or time_overlaps:
+                    duplicate = True
+                    break
+            if duplicate:
+                continue
+            kept_ordered.append(curr)
+            kept_bounds.append((curr_sids, curr_in, curr_out))
+        for idx, c in enumerate(kept_ordered, start=1):
+            c["clip_id"] = idx
+        return kept_ordered
 
     def _sort_key(c: dict) -> tuple[float, float]:
         t_in, t_out = _clip_time_bounds(c, unit_by_id, whisper_units)
@@ -741,6 +767,7 @@ def repair_edl_micro_windows(
     total_dur: float,
     run_window_inference_fn,
     script_text: str | None = None,
+    keep_order: bool = False,
 ) -> tuple[dict, list[dict]]:
     """
     Execute targeted micro-window re-scans for detected pre-render anomalies and splice
@@ -828,6 +855,7 @@ def repair_edl_micro_windows(
             clips=clips,
             whisper_units=whisper_units,
             script_text=script_text,
+            keep_order=keep_order,
         )
 
     updated_edl = dict(model_edl)
@@ -840,6 +868,7 @@ def sanitize_refined_edl(
     total_dur: float,
     min_clip_dur: float = 0.45,
     merge_gap_thresh: float = 0.35,
+    allow_reorder: bool = False,
 ) -> tuple[list[dict], dict]:
     """
     Sanitize physical clip timings after acoustic boundary locking and before NLE/MP4 export.
@@ -849,6 +878,8 @@ def sanitize_refined_edl(
     2. Prune contained or backward-jumping redundant clips and resolve micro-overlaps at their midpoint.
     3. Merge flash-frame micro-clips (< 0.45s) into adjacent clips when gap < 0.35s.
     4. Guarantee strict forward monotonicity (source_in < source_out and c[i].source_out <= c[i+1].source_in).
+    5. With allow_reorder=True, overlap resolution still runs in source order, micro-clips merge
+       only with their timeline neighbour, and the input timeline order is restored at the end.
     """
     stats = {
         "overlaps_resolved": 0,
@@ -858,7 +889,7 @@ def sanitize_refined_edl(
     if not refined_edl:
         return [], stats
 
-    sanitized = [dict(c) for c in refined_edl]
+    sanitized = [dict(c, _seq=i, _seq_last=i) for i, c in enumerate(refined_edl)]
 
     # 1. Enforce source_bounds and plosive tail protection (source_out >= t_last)
     for c in sanitized:
@@ -923,8 +954,10 @@ def sanitize_refined_edl(
             and (c["duration"] < min_clip_dur or merged[-1]["duration"] < min_clip_dur)
             and c["source_out"] > merged[-1]["source_out"]
             and 0.0 <= (c["source_in"] - merged[-1]["source_out"]) <= merge_gap_thresh
+            and (not allow_reorder or int(c.get("_seq", -9)) == int(merged[-1].get("_seq_last", -99)) + 1)
         ):
             prev = merged[-1]
+            prev["_seq_last"] = c.get("_seq", prev.get("_seq_last"))
             prev["source_out"] = c["source_out"]
             prev["duration"] = round(prev["source_out"] - prev["source_in"], 2)
             if c.get("t_last") is not None:
@@ -940,11 +973,16 @@ def sanitize_refined_edl(
         else:
             merged.append(c)
 
+    if allow_reorder:
+        merged.sort(key=lambda c: int(c.get("_seq", 0)))
+
     final_clips: list[dict] = []
     for c in merged:
         dur = round(float(c["source_out"]) - float(c["source_in"]), 2)
         if dur <= 0.0:
             continue
+        c.pop("_seq", None)
+        c.pop("_seq_last", None)
         c["duration"] = dur
         c["clip_id"] = len(final_clips) + 1
         c["cps"], _ = calculate_clip_cps(c.get("transcript", ""), dur)
@@ -962,9 +1000,15 @@ def audit_edl_quality(
     script_path: Path | None = None,
     sanitization_stats: dict | None = None,
     micro_window_repairs: list[dict] | None = None,
+    allow_reorder: bool = False,
+    mode_label: str | None = None,
+    extra_cli_flags: str = "",
 ) -> dict:
     """
     Execute an 8-dimension rough-cut quality audit and compute the top-level agent_verdict.
+
+    allow_reorder: Show Mode. Out-of-order clips become a warning instead of a fatal violation;
+    overlaps are still checked in source order.
 
     ASD-STE100:
     Evaluate Whisper lock rate, timeline monotonicity, retake hygiene, script coverage,
@@ -1011,18 +1055,22 @@ def audit_edl_quality(
         s_out = float(c.get("source_out", 0.0))
         if s_in < -0.01 or s_out > total_dur + 0.05 or s_out <= s_in:
             out_of_bounds_count += 1
-        if i > 0:
-            prev_in = float(refined_edl[i - 1].get("source_in", 0.0))
-            prev_out = float(refined_edl[i - 1].get("source_out", 0.0))
-            if s_in < prev_in:
-                out_of_order_count += 1
-            elif s_in < prev_out - 0.005:
-                overlap_count += 1
+        if i > 0 and s_in < float(refined_edl[i - 1].get("source_in", 0.0)):
+            out_of_order_count += 1
+
+    # Overlaps are a physical property of the source ranges, so check them in source order
+    source_sorted = sorted(refined_edl, key=lambda c: (float(c.get("source_in", 0.0)), float(c.get("source_out", 0.0))))
+    for i in range(1, len(source_sorted)):
+        if float(source_sorted[i].get("source_in", 0.0)) < float(source_sorted[i - 1].get("source_out", 0.0)) - 0.005:
+            overlap_count += 1
 
     if overlap_count > 0:
         fatal_violations.append(f"Detected {overlap_count} overlapping clip boundary pair(s).")
     if out_of_order_count > 0:
-        fatal_violations.append(f"Detected {out_of_order_count} non-monotonic out-of-order clip(s).")
+        if allow_reorder:
+            warnings.append(f"Timeline contains {out_of_order_count} intentionally reordered clip(s) (--allow-reorder).")
+        else:
+            fatal_violations.append(f"Detected {out_of_order_count} non-monotonic out-of-order clip(s).")
     if out_of_bounds_count > 0:
         fatal_violations.append(f"Detected {out_of_bounds_count} clip(s) outside [0, {total_dur:.2f}s].")
 
@@ -1174,8 +1222,9 @@ def audit_edl_quality(
     if not pass_gate:
         script_flag = f' -s "{script_path}"' if script_path else ""
         remediation_reason = "; ".join(fatal_violations)
+        extra = f" {extra_cli_flags.strip()}" if extra_cli_flags and extra_cli_flags.strip() else ""
         remediation_cmd = (
-            f'python3 skills/video-trimmer/scripts/video_trimmer.py -i "{video_path}"{script_flag}'
+            f'python3 skills/video-trimmer/scripts/video_trimmer.py -i "{video_path}"{script_flag}{extra}'
         )
 
     return {
@@ -1190,7 +1239,7 @@ def audit_edl_quality(
         },
         "summary": {
             "video_file": video_path.name,
-            "mode": "Mode A (Script-Anchored)" if script_blocks else "Mode B (Unscripted Intent-Window)",
+            "mode": mode_label or ("Mode A (Script-Anchored)" if script_blocks else "Mode B (Unscripted Intent-Window)"),
             "source_duration_sec": round(total_dur, 2),
             "trimmed_duration_sec": trimmed_dur,
             "trim_ratio_pct": trim_ratio_pct,
@@ -1208,7 +1257,8 @@ def audit_edl_quality(
                 "overlap_count": overlap_count,
                 "out_of_order_count": out_of_order_count,
                 "out_of_bounds_count": out_of_bounds_count,
-                "pass": overlap_count == 0 and out_of_order_count == 0 and out_of_bounds_count == 0,
+                "reorder_allowed": allow_reorder,
+                "pass": overlap_count == 0 and (allow_reorder or out_of_order_count == 0) and out_of_bounds_count == 0,
             },
             "3_retake_and_speaker_hygiene": {
                 "residual_retake_count": len(residual_retake_pairs),

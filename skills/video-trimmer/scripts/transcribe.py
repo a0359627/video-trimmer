@@ -348,13 +348,17 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
 def transcribe_video_whisper(
     video_path,
     out_json_path,
-    model_name="small"
+    model_name="small",
+    offscreen_channel=None,
 ):
     """
     第一階段：微觀聲學時間戳對齊 (Word-level Ground Truth)
     在調用大模型之前，先在本地以 Whisper 生成帶有毫秒級字級時間戳的結構化劇本。
+    offscreen_channel: Show Mode 用。"left" / "right" / "auto" 時，依雙聲道麥克風能量把每個字
+    標成 HOST / OFFSCREEN / CUE，並在角色切換處拆句；None 或 "none" 維持原行為。
     返回: (raw_segments, merged_sentences)
     """
+    video_path = Path(video_path)
     out_json = Path(out_json_path)
     sentences_json = out_json.parent / f"{video_path.stem}_whisper_sentences.json"
 
@@ -436,17 +440,46 @@ def transcribe_video_whisper(
         logger.info("[提示] 未安裝 mlx-whisper 或 faster-whisper，跳過本地字級轉錄。")
         return [], []
 
+    # Show Mode：先依麥克風聲道把每個字歸屬給主持人 / 場外 / 倒數口令，並在角色切換處拆開片段。
+    # 原始 Whisper 快取 (out_json) 維持不變，角色每次重新計算。
+    segments_for_merge = raw_results
+    if offscreen_channel and str(offscreen_channel).lower() != "none":
+        from .roles import apply_mic_roles
+
+        logger.info("Show Mode：依雙聲道麥克風能量歸屬說話者角色（場外聲道設定=%s）...", offscreen_channel)
+        segments_for_merge, _role_info = apply_mic_roles(
+            raw_results, video_path, out_json.parent, offscreen_channel=str(offscreen_channel).lower()
+        )
+
     # 執行語意句子合併（每次由 raw_results 即時計算，確保最新斷句與重講拆分規則生效）
-    sentences = merge_whisper_segments_to_sentences(raw_results)
+    sentences = merge_whisper_segments_to_sentences(segments_for_merge)
     with open(sentences_json, "w", encoding="utf-8") as f:
         json.dump(sentences, f, ensure_ascii=False, indent=2)
-    logger.info("語意合併完成：從 %d 個聲學碎片濃縮為 %d 個完整語意句子！", len(raw_results), len(sentences))
+    logger.info("語意合併完成：從 %d 個聲學碎片濃縮為 %d 個完整語意句子！", len(segments_for_merge), len(sentences))
 
     return raw_results, sentences
 
 
 def format_whisper_transcript_for_prompt(whisper_sentences):
     """將 Whisper 合併後的語意句子格式化為 Gemini 提示詞專用的文字剪輯清單"""
+    from .roles import has_role_tags, role_of_sentence
+
+    if has_role_tags(whisper_sentences):
+        # Show Mode：每句帶 [HOST] / [OFFSCREEN] / [CUE] 標籤，取捨規則交由主提示詞決定
+        lines = [
+            "\n---",
+            "## Whisper 語意句子時間戳劇本（Show Mode，含麥克風角色標籤）",
+            "以下句子由本地 Whisper 轉錄並依換氣停頓拆分；每句前的標籤來自雙聲道麥克風能量分析，可信度高：",
+            "- [HOST]：畫面中的主持人。",
+            "- [OFFSCREEN]：畫面外的導演。可能是節目的一部分（聲音角色台詞、提問、反應），也可能是指令、餵詞或閒聊；請依主提示詞的角色判定規則取捨。",
+            "- [CUE]：倒數或口令，永遠剔除。",
+            "請在 final_edl 的 `sentence_ids` 列出保留的 Sentence ID，一個 clip 只含同一角色，並以句子的 start / end 填 `source_in` / `source_out`：\n",
+        ]
+        for s in whisper_sentences:
+            tag = role_of_sentence(s) or "HOST"
+            lines.append(f"[Sentence ID: {s['id']:3d}] {s['start']:6.2f}s -> {s['end']:6.2f}s | [{tag}] {s['text']}")
+        return "\n".join(lines)
+
     lines = [
         "\n---",
         "## Whisper 語意句子時間戳劇本 (Ground-Truth Semantic Sentences)",

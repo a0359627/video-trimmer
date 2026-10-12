@@ -62,6 +62,12 @@ from .gemini_client import (
     stage_video_to_gcs,
 )
 from .render import probe_video, render_cut_video
+from .assembly import (
+    build_assembly_prompt,
+    normalize_assembled_edl,
+    parse_assembly_json,
+    run_assembly_inference,
+)
 from .transcribe import (
     align_clip_with_whisper,
     calculate_active_script_window,
@@ -172,15 +178,37 @@ def _run(args):
             video_path,
             whisper_json,
             model_name="small",
+            offscreen_channel=getattr(args, "offscreen_channel", None),
         )
 
     whisper_units = whisper_sentences if whisper_sentences else whisper_segs
+
+    if getattr(args, "transcribe_only", False):
+        role_counts: dict[str, int] = {}
+        for u in whisper_units:
+            key = str(u.get("speaker_id", "SPEAKER_00"))
+            role_counts[key] = role_counts.get(key, 0) + 1
+        logger.info("==> [transcribe-only] 轉錄完成：%d 句 | 角色統計: %s | 輸出目錄: %s",
+                    len(whisper_units), role_counts, out_dir)
+        return
+
+    # Show Mode 參數：Mode C 參考腳本、重排、代理分析檔
+    reference_script_path = Path(args.reference_script).resolve() if getattr(args, "reference_script", None) else None
+    reference_script_text = (
+        reference_script_path.read_text(encoding="utf-8")
+        if (reference_script_path is not None and reference_script_path.exists()) else None
+    )
+    allow_reorder = bool(getattr(args, "allow_reorder", False))
 
     # 第二階段：Gemini 宏觀多模態視訊理解與選鏡決策
     inference_metrics = {}
     micro_window_repairs = []
     script_path = Path(args.script).resolve() if args.script else None
     script_text = script_path.read_text(encoding="utf-8") if (script_path is not None and script_path.exists()) else None
+    # Mode C：腳本只作結構參考。Mode A 的覆蓋率檢查、碰撞修復、腳本去重與「講稿視窗鎖定」一律關閉，
+    # 因為脫稿的開場或結尾不在腳本裡，鎖定視窗會把它們切掉。
+    audit_script_text = None if reference_script_text is not None else script_text
+    window_script_text = script_text
 
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
@@ -195,6 +223,7 @@ def _run(args):
 
         _resolved_file = Path(__file__).resolve()
         prompt_candidates = [
+            *([Path(args.prompt).expanduser().resolve()] if getattr(args, "prompt", None) else []),
             Path(__file__).parent / "prompts" / "video_cut_prompt.md",
             Path(__file__).parent.parent / "prompts" / "video_cut_prompt.md",
             Path.cwd() / "prompts" / "video_cut_prompt.md",
@@ -204,10 +233,10 @@ def _run(args):
 
         # Step 3a: 若提供講稿且影片為長素材，先依據講稿語意句子定位有效視訊視窗
         win_start, win_end, active_units = 0.0, total_dur, whisper_units
-        if script_text is not None and total_dur > 600.0 and whisper_units:
+        if window_script_text is not None and total_dur > 600.0 and whisper_units:
             win_start, win_end, active_units = calculate_active_script_window(
                 whisper_units=whisper_units,
-                script_text=script_text,
+                script_text=window_script_text,
                 total_duration=total_dur,
                 padding_seconds=20.0,
             )
@@ -239,8 +268,16 @@ def _run(args):
             or ""
         ).removeprefix("gs://") or None
 
+        analysis_source = video_path
+        if getattr(args, "analysis_video", None):
+            analysis_source = Path(args.analysis_video).expanduser().resolve()
+            if not analysis_source.exists():
+                raise InvalidInputError(f"找不到 --analysis-video 代理檔: {analysis_source}")
+            logger.info("    [代理分析] 上傳與 Gemini 分析使用 %s；Whisper 時間戳與 XML 仍對原檔 %s",
+                        analysis_source.name, video_path.name)
+
         logger.info("==> 3. 準備視訊至 Cloud Storage 暫存...")
-        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(video_path, resolved_bucket)
+        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(analysis_source, resolved_bucket)
 
         mode_str = "Agentic Video Understanding" if args.agentic else "Static Multimodal"
         logger.info("==> 4. 調用 %s [模式: %s] 結合 Whisper 劇本進行文字剪輯與選鏡決策...", args.model, mode_str)
@@ -254,7 +291,12 @@ def _run(args):
                 logger.info("    [長片自動分段] 有效跨度 %.1fs 分割為 %d 個自然停頓區段依序推論...", win_end - win_start, len(chunks))
 
             for idx, (c_start, c_end, c_units) in enumerate(chunks, start=1):
-                c_prompt = build_prompt(prompt_candidates, script_path=script_path, whisper_units=c_units)
+                c_prompt = build_prompt(
+                    prompt_candidates,
+                    script_path=script_path,
+                    whisper_units=c_units,
+                    reference_script_path=reference_script_path,
+                )
                 use_window_meta = (c_start > 0.0) or (c_end < total_dur - 1.0) or (len(chunks) > 1)
                 start_offset = f"{int(c_start)}s" if use_window_meta else None
                 end_offset = f"{int(math.ceil(c_end))}s" if use_window_meta else None
@@ -297,6 +339,30 @@ def _run(args):
                     project_title=f"{base_name} AI Video Trimmer ({tag})",
                 )
 
+            # Step 4a: Show Mode 全片組裝（純文字推論）：跨區段取捨、場外角色判定、段落標籤與順序
+            if getattr(args, "assemble", False) and whisper_units:
+                a_prompt = build_assembly_prompt(
+                    prompt_candidates,
+                    chunk_edl_results,
+                    whisper_units,
+                    reference_script_path=reference_script_path,
+                    script_path=script_path,
+                )
+                n_candidates = sum(len(ch.get("final_edl", [])) for ch in chunk_edl_results if isinstance(ch, dict))
+                a_raw_json, a_usage, a_dur = run_assembly_inference(
+                    client, types, args.model, a_prompt, n_candidates, len(whisper_units)
+                )
+                duration += a_dur
+                for k in usage:
+                    usage[k] += a_usage.get(k, 0)
+                (out_dir / f"{base_name}_{tag}_assembly_raw.json").write_text(a_raw_json, encoding="utf-8")
+                (out_dir / f"{base_name}_{tag}_chunks_raw.json").write_text(
+                    json.dumps(chunk_edl_results, ensure_ascii=False, indent=2), encoding="utf-8"
+                )
+                model_edl = normalize_assembled_edl(parse_assembly_json(a_raw_json), whisper_units, chunk_edl_results)
+                logger.info("    [全片組裝] 候選 %d -> 最終 %d clips（%.1f 秒）",
+                            n_candidates, len(model_edl.get("final_edl", [])), a_dur)
+
             # Step 4b: Pre-Render Semantic Audit & Surgical Micro-Window Repair (15s-90s windows)
             if whisper_units:
                 def _run_window_repair(win_units, win_start, win_end, start_offset, end_offset, anomaly):
@@ -306,6 +372,7 @@ def _run(args):
                         whisper_units=win_units,
                         anomaly=anomaly,
                         script_path=script_path,
+                        reference_script_path=reference_script_path,
                     )
                     w_raw_json, w_usage, w_dur = run_gemini_inference(
                         client,
@@ -330,7 +397,8 @@ def _run(args):
                     whisper_units=whisper_units,
                     total_dur=total_dur,
                     run_window_inference_fn=_run_window_repair,
-                    script_text=script_text,
+                    script_text=audit_script_text,
+                    keep_order=allow_reorder,
                 )
         finally:
             if is_ephemeral and not args.keep_gcs_upload:
@@ -365,14 +433,18 @@ def _run(args):
         model_edl["final_edl"] = deduplicate_and_sort_clips(
             clips=model_edl["final_edl"],
             whisper_units=whisper_units,
-            script_text=script_text,
+            script_text=audit_script_text,
+            keep_order=allow_reorder,
         )
 
     expanded_units = []
     for c in model_edl.get("final_edl", []):
         sub_units = resolve_clip_sub_units(whisper_units, c, total_dur)
+        base_topic = str(c.get("topic", ""))
+        if str(c.get("role", "host")).lower() == "offscreen":
+            base_topic = f"[場外] {base_topic}"
         for idx, su in enumerate(sub_units):
-            topic_label = c["topic"] if len(sub_units) == 1 else f"{c['topic']} (#{idx + 1})"
+            topic_label = base_topic if len(sub_units) == 1 else f"{base_topic} (#{idx + 1})"
             expanded_units.append({
                 "parent_clip": c,
                 "topic": topic_label,
@@ -422,6 +494,9 @@ def _run(args):
             "out_margin": out_m,
             "transcript": transcript,
             "whisper_transcript": su.get("whisper_transcript", transcript),
+            "role": str(c.get("role", "host")).lower(),
+            "segment": c.get("segment", ""),
+            "timeline_position": c.get("timeline_position"),
             "take_selection_reason": c.get("take_selection_reason", ""),
             "visual_check": c.get("visual_check", "眼神直視鏡頭就緒，無眨眼閉眼"),
             "audio_check": c.get("audio_check", f"Whisper精準錨定 (In前置氣息={in_m:.2f}s, Out俐落收口={out_m:.2f}s)")
@@ -432,22 +507,41 @@ def _run(args):
     temp_wav.unlink(missing_ok=True)
 
     # 5d. 物理時間軸確定性自癒 (Overlap De-confliction, Plosive Tail Floor, Micro-Clip Coalescing)
-    refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur)
+    refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur, allow_reorder=allow_reorder)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
     avg_cps = round(sum(c["cps"] for c in refined_edl) / max(1, len(refined_edl)), 2)
     logger.info("    初剪片段數: %d | 成片預計長度: %.1f 秒 (~%.2f 分鐘) | 全片平均語速: %.2f 字/秒",
                 len(refined_edl), total_out_dur, total_out_dur / 60, avg_cps)
 
     # 5e. 執行 8 維度粗剪品質審計 (8-Dimension Rough-Cut Quality Audit & agent_verdict)
+    show_mode_flags = []
+    if getattr(args, "prompt", None):
+        show_mode_flags.append(f'--prompt "{args.prompt}"')
+    if reference_script_path is not None:
+        show_mode_flags.append(f'--reference-script "{reference_script_path}"')
+    if getattr(args, "offscreen_channel", None) and str(args.offscreen_channel).lower() != "none":
+        show_mode_flags.append(f"--offscreen-channel {args.offscreen_channel}")
+    if getattr(args, "analysis_video", None):
+        show_mode_flags.append(f'--analysis-video "{args.analysis_video}"')
+    if getattr(args, "assemble", False):
+        show_mode_flags.append("--assemble")
+    if allow_reorder:
+        show_mode_flags.append("--allow-reorder")
+    if getattr(args, "xml_only", False):
+        show_mode_flags.append("--xml-only")
+
     audit_report = audit_edl_quality(
         refined_edl=refined_edl,
         whisper_units=whisper_units,
         total_dur=total_dur,
         video_path=video_path,
-        script_text=script_text,
+        script_text=audit_script_text,
         script_path=script_path,
         sanitization_stats=sanitization_stats,
         micro_window_repairs=micro_window_repairs,
+        allow_reorder=allow_reorder,
+        mode_label=("Mode C (Script Reference, Show Mode)" if reference_script_text is not None else None),
+        extra_cli_flags=" ".join(show_mode_flags),
     )
     report_json_path = out_dir / f"{base_name}_{tag}_edl_report.json"
     report_md_path = out_dir / f"{base_name}_{tag}_edl_report.md"
@@ -486,10 +580,14 @@ def _run(args):
     generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps)
     logger.info("==> 9. 輸出 Final Cut Pro X 工程檔: %s", fcpxml_path.name)
 
-    out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
-    logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
-    render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
-    logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
+    if getattr(args, "xml_only", False):
+        logger.info("==> 10. 已指定 --xml-only，略過 FFmpeg 渲染成片。")
+        logger.info("==> [完成] 剪輯工程檔已產出: %s", xml_path.name)
+    else:
+        out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
+        logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
+        render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
+        logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
 
     if args.strict and not verdict["pass_quality_gate"]:
         logger.error("==> [嚴格品質閘門未通過] %s", "; ".join(verdict["fatal_violations"]))
@@ -519,6 +617,23 @@ def main():
     parser.add_argument("--skip-whisper", action="store_true", help="跳過本地 Whisper 轉錄，僅使用純能量檢測")
     parser.add_argument("--strict", action="store_true", help="啟用嚴格品質閘門 (若 agent_verdict.pass_quality_gate 為 false 則於輸出報告後以 exit code 2 結束)")
     parser.add_argument("--verbose", action="store_true", help="輸出詳細除錯訊息 (DEBUG level)")
+    # Show Mode（節目型拍帶：主持人 + 場外聲音角色）。以下旗標預設全部關閉，不影響原有行為。
+    show = parser.add_argument_group("Show Mode（主持人 + 場外聲音角色）")
+    show.add_argument("--prompt", default=None,
+                      help="指定提示詞檔案（例如 prompts/video_cut_prompt_show.md），預設使用 prompts/video_cut_prompt.md")
+    show.add_argument("--reference-script", default=None,
+                      help="Mode C：腳本只作結構參考（不做 Mode A 覆蓋率檢查與單向消耗），TXT/MD")
+    show.add_argument("--offscreen-channel", choices=["none", "auto", "left", "right"], default="none",
+                      help="雙麥克風拍攝時場外麥克風所在聲道；auto 取整體較小聲的聲道。會把每句標成 HOST/OFFSCREEN/CUE 並在角色切換處拆句")
+    show.add_argument("--analysis-video", default=None,
+                      help="上傳與 Gemini 分析改用此代理檔（例如 1080p），Whisper 時間戳、聲學鎖定與 XML 仍以 -i 原檔為準")
+    show.add_argument("--assemble", action="store_true",
+                      help="分段推論後再做一次純文字全片組裝：跨區段取捨、場外角色判定、段落標籤與順序")
+    show.add_argument("--allow-reorder", action="store_true",
+                      help="允許成片順序與原片時間順序不同（依 timeline_position），順序顛倒改為警告而非 fatal")
+    show.add_argument("--xml-only", action="store_true", help="只輸出 JSON/CSV/XML/FCPXML 與審計報告，不渲染 MP4")
+    show.add_argument("--transcribe-only", action="store_true",
+                      help="只做 Whisper 轉錄與句子合併（含角色標籤）後結束，不上傳也不呼叫 Gemini")
     args = parser.parse_args()
 
     _setup_logging(args.verbose)
