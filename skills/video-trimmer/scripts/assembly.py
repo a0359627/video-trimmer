@@ -22,6 +22,7 @@ from .gemini_client import (
     _generate_content,
     _usage_from_generate_content,
     build_prompt,
+    parse_edl_json_text,
 )
 from .constants import GEMINI_MAX_OUTPUT_TOKENS
 
@@ -188,15 +189,5 @@ def normalize_assembled_edl(assembled: dict, whisper_units: list[dict], chunk_re
 
 
 def parse_assembly_json(raw_json: str) -> dict:
-    """Parse the JSON text returned by the assembly pass (tolerates markdown fences)."""
-    cleaned = (raw_json or "").strip()
-    if "```json" in cleaned:
-        cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-    elif "```" in cleaned:
-        cleaned = cleaned.split("```")[1].split("```")[0].strip()
-    elif not cleaned.startswith("{") and "{" in cleaned:
-        cleaned = cleaned[cleaned.find("{"): cleaned.rfind("}") + 1]
-    try:
-        return json.loads(cleaned)
-    except Exception as e:  # noqa: BLE001
-        raise GeminiAPIError(f"解析全片組裝 JSON 失敗: {e}\n原始回傳內容:\n{cleaned[:2000]}") from e
+    """Parse the JSON text returned by the assembly pass (object, bare array or fenced)."""
+    return parse_edl_json_text(raw_json)

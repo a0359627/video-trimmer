@@ -170,6 +170,65 @@ def format_script_blocks_for_prompt(script_content: str) -> str:
     return "\n".join(f"{b['label']} {b['raw_text']}" for b in blocks)
 
 
+def parse_edl_json_text(raw_json: str) -> dict:
+    """Parse the JSON text returned by Gemini into an EDL dict with a `final_edl` list.
+
+    ASD-STE100:
+    1. Remove markdown fences when present.
+    2. Accept a top-level object, a top-level array of clips, or a single clip object.
+    3. When the text has leading or trailing prose, decode the first JSON value found.
+    """
+    import json
+
+    cleaned = (raw_json or "").strip()
+    if "```json" in cleaned:
+        cleaned = cleaned.split("```json")[1].split("```")[0].strip()
+    elif cleaned.startswith("```"):
+        cleaned = cleaned.split("```")[1].split("```")[0].strip()
+
+    obj = None
+    try:
+        obj = json.loads(cleaned)
+    except Exception:  # noqa: BLE001
+        # A bare comma-separated list of clip objects without the surrounding brackets
+        if cleaned.startswith("{"):
+            try:
+                obj = json.loads(f"[{cleaned}]")
+            except Exception:  # noqa: BLE001
+                obj = None
+        if obj is None:
+            decoder = json.JSONDecoder()
+            starts = [i for i in (cleaned.find("{"), cleaned.find("[")) if i != -1]
+            last_err: Exception | None = None
+            for start in sorted(starts):
+                try:
+                    obj, _ = decoder.raw_decode(cleaned[start:])
+                    break
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    continue
+            if obj is None:
+                raise GeminiAPIError(f"解析 Gemini JSON 失敗: {last_err}\n原始回傳內容:\n{cleaned[:3000]}") from last_err
+
+    if isinstance(obj, list):
+        obj = {"final_edl": [c for c in obj if isinstance(c, dict)]}
+    if not isinstance(obj, dict):
+        raise GeminiAPIError(f"Gemini JSON 不是物件或陣列: {type(obj).__name__}")
+    if "final_edl" not in obj:
+        if "sentence_ids" in obj or "clip_id" in obj:
+            obj = {"final_edl": [obj]}
+        else:
+            for key, val in obj.items():
+                if isinstance(val, list) and val and all(isinstance(c, dict) for c in val) and any("sentence_ids" in c for c in val):
+                    obj = dict(obj)
+                    obj["final_edl"] = val
+                    break
+            else:
+                obj = dict(obj)
+                obj["final_edl"] = []
+    return obj
+
+
 def _clean_reference_script(script_text: str, max_chars: int = 12000) -> str:
     """Keep headings, speaker lines and stage notes; drop blank lines; cap the length."""
     lines = [ln.rstrip() for ln in script_text.splitlines()]

@@ -49,7 +49,7 @@ from .edl_auditor import (
     repair_edl_micro_windows,
     sanitize_refined_edl,
 )
-from .exceptions import InvalidInputError, VideoTrimmerError
+from .exceptions import GeminiAPIError, InvalidInputError, VideoTrimmerError
 from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
 from .gcs_utils import delete_gcs_blob, is_gdrive_source, download_gdrive_file_with_cache
 from .gemini_client import (
@@ -58,6 +58,7 @@ from .gemini_client import (
     get_gemini_client,
     load_env_file,
     merge_chunked_edl,
+    parse_edl_json_text,
     run_gemini_inference,
     stage_video_to_gcs,
 )
@@ -81,21 +82,11 @@ logger = logging.getLogger(__name__)
 
 
 def _parse_gemini_json_text(raw_json: str) -> dict:
-    """Clean markdown fences and parse JSON returned by Gemini."""
-    cleaned = (raw_json or "").strip()
-    if "```json" in cleaned:
-        cleaned = cleaned.split("```json")[1].split("```")[0].strip()
-    elif "```" in cleaned:
-        cleaned = cleaned.split("```")[1].split("```")[0].strip()
-    elif not cleaned.startswith("{") and "{" in cleaned:
-        start_idx = cleaned.find("{")
-        end_idx = cleaned.rfind("}")
-        if start_idx != -1 and end_idx != -1:
-            cleaned = cleaned[start_idx : end_idx + 1].strip()
+    """Clean markdown fences and parse JSON returned by Gemini (object, bare array or single clip)."""
     try:
-        return json.loads(cleaned)
-    except Exception as e:
-        raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
+        return parse_edl_json_text(raw_json)
+    except GeminiAPIError as e:
+        raise VideoTrimmerError(str(e)) from e
 
 
 def _setup_logging(verbose):
@@ -329,6 +320,8 @@ def _run(args):
                 for k in usage:
                     usage[k] += c_usage.get(k, 0)
 
+                # 先把原始回傳落地再解析，解析失敗時仍可查核模型輸出
+                (out_dir / f"{base_name}_{tag}_chunk{idx}_raw.txt").write_text(c_raw_json or "", encoding="utf-8")
                 chunk_edl_results.append(_parse_gemini_json_text(c_raw_json))
 
             if len(chunk_edl_results) == 1:

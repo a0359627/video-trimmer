@@ -241,6 +241,20 @@ class TestAssembly(unittest.TestCase):
         raw = "```json\n{\"final_edl\": [], \"notes\": \"n\"}\n```"
         assert parse_assembly_json(raw)["notes"] == "n"
 
+    def test_parse_accepts_bare_array_single_clip_and_prose_wrapped_object(self):
+        from scripts.gemini_client import parse_edl_json_text
+
+        bare = "[\n  {\"clip_id\": 1, \"sentence_ids\": [1]},\n  {\"clip_id\": 2, \"sentence_ids\": [2]}\n]"
+        assert [c["clip_id"] for c in parse_edl_json_text(bare)["final_edl"]] == [1, 2]
+        single = "{\"clip_id\": 7, \"sentence_ids\": [3]}"
+        assert parse_edl_json_text(single)["final_edl"][0]["clip_id"] == 7
+        prose = "Here is the result:\n{\"project_title\": \"t\", \"final_edl\": [{\"clip_id\": 1, \"sentence_ids\": [1]}]}\nThanks."
+        assert parse_edl_json_text(prose)["project_title"] == "t"
+        bracketless = "{\"clip_id\": 1, \"sentence_ids\": [1]},\n{\"clip_id\": 2, \"sentence_ids\": [2]}"
+        assert len(parse_edl_json_text(bracketless)["final_edl"]) == 2
+        renamed = "{\"clips\": [{\"clip_id\": 1, \"sentence_ids\": [1]}]}"
+        assert len(parse_edl_json_text(renamed)["final_edl"]) == 1
+
     def test_candidates_are_rendered_per_chunk(self):
         text = format_candidates_for_assembly([
             {"final_edl": [{"clip_id": 1, "role": "host", "segment": "Hook", "sentence_ids": [1],

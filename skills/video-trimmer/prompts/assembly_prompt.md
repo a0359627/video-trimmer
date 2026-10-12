@@ -17,7 +17,7 @@
 - 嚴禁把前一次嘗試的前半句和後一次的後半句拼接。
 - `source_in`、`source_out` 直接取句子的 `start`、`end`，不要估算。
 
-## 輸出（純 JSON）
+## 輸出（純 JSON，最外層必須是物件，clip 陣列放在 `final_edl` 底下，不要直接輸出陣列）
 
 ```json
 {
