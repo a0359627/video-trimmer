@@ -179,6 +179,77 @@ def analyze_seams(edl: list[dict], sentences: list[dict], fps: float, manual_sid
     return records
 
 
+def analyze_boundaries_acoustically(edl: list[dict], video_path: Path, temp_dir: Path, fps: float,
+                                    threshold_db: float = -35.0) -> list[dict]:
+    """Ground-truth check of every in/out point against the source audio.
+
+    HEAD_BLEED: speech energy right before the in-point (the previous phrase runs straight
+    into this clip, so the first 100 ms may carry the tail of a dropped sentence).
+    TAIL_CONTINUES: speech energy right after the out-point while the clip ends in speech
+    (the host keeps talking, so the last syllable may be clipped or the cut lands mid-flow).
+    Both are review hints for the editor, not automatic fixes.
+    """
+    import numpy as np
+
+    from .roles import extract_stereo_wav, load_stereo_audio
+
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    wav = temp_dir / f"temp_{Path(video_path).stem}_boundaries.wav"
+    extract_stereo_wav(video_path, wav)
+    try:
+        audio, sr = load_stereo_audio(wav)
+    finally:
+        wav.unlink(missing_ok=True)
+
+    def level(t0: float, t1: float) -> float:
+        i0, i1 = max(0, int(t0 * sr)), min(audio.shape[0], int(t1 * sr))
+        if i1 <= i0:
+            return -120.0
+        seg = audio[i0:i1]
+        return float(max(20.0 * np.log10(max(float(np.sqrt(np.mean(seg[:, ch] ** 2))), 1e-9)) for ch in range(seg.shape[1])))
+
+    out = []
+    for c in edl:
+        si, so = float(c["source_in"]), float(c["source_out"])
+        flags = []
+        pre = level(si - 0.12, si - 0.02)
+        if pre > threshold_db:
+            flags.append({"type": "HEAD_BLEED", "detail": f"入點前 0.1 秒仍有語音（{pre:.0f} dBFS），開頭可能帶到前一句尾音，請聽第一個字"})
+        last_in = level(so - 0.12, so - 0.02)
+        post = level(so + 0.02, so + 0.12)
+        if last_in > threshold_db and post > threshold_db:
+            flags.append({"type": "TAIL_CONTINUES", "detail": f"出點後語音仍在持續（{post:.0f} dBFS），請聽最後一個字是否完整"})
+        if flags:
+            out.append({"clip_id": c["clip_id"], "flags": flags})
+    return out
+
+
+def merge_flag_records(base: list[dict], extra: list[dict], edl: list[dict], fps: float) -> list[dict]:
+    """Merge extra per-clip flags into seam records (creating records for clips not yet flagged)."""
+    layout = {p["clip_id"]: p for p in timeline_layout(edl, fps)}
+    by_clip = {r["clip_id"]: r for r in base}
+    clips = {c["clip_id"]: c for c in edl}
+    for e in extra:
+        cid = e["clip_id"]
+        if cid in by_clip:
+            by_clip[cid]["flags"].extend(e["flags"])
+            continue
+        c = clips[cid]
+        p = layout[cid]
+        by_clip[cid] = {
+            "clip_id": cid,
+            "timeline_tc": tc(p["start_f"] / fps, fps),
+            "timeline_end_tc": tc(p["end_f"] / fps, fps),
+            "timeline_start_frame": p["start_f"],
+            "source_tc": tc(float(c["source_in"]), fps),
+            "source_end_tc": tc(float(c["source_out"]), fps),
+            "sentence_ids": [int(x) for x in c.get("sentence_ids", [])],
+            "text": (c.get("whisper_transcript") or c.get("transcript") or "")[:60],
+            "flags": list(e["flags"]),
+        }
+    return sorted(by_clip.values(), key=lambda r: r["timeline_start_frame"])
+
+
 def records_to_markers(records: list[dict]) -> list[dict]:
     """Sequence markers for the XML exporter: one per flagged clip, at the clip's timeline start."""
     markers = []
@@ -210,13 +281,14 @@ def load_json(p: Path) -> dict:
     return json.loads(Path(p).read_text(encoding="utf-8"))
 
 
-def build_clip_exact_readthrough(edl: list[dict], cut_segments: list[dict], fps: float) -> str:
+def build_clip_exact_readthrough(edl: list[dict], cut_segments: list[dict], fps: float,
+                                 timestamp_bias_sec: float = 0.20) -> str:
     """Read-through text with one line per clip and a ‖ mark at every cut.
 
     Words from the re-transcribed cut audio are assigned to the clip that contains the
-    word's midpoint, so the text on each line is what the viewer hears inside that clip.
-    Whisper timestamps on the cut can be a few hundred milliseconds early, so a word that
-    straddles a boundary may land on the earlier line; the ‖ marks still show the cut.
+    word's midpoint. Whisper word timestamps on the cut start ~0.2 s early (measured median
+    0.18 s on C7411), so `timestamp_bias_sec` is added before assignment; without it the
+    first character of a clip lands on the previous line and reads like a word cut in half.
     """
     layout = timeline_layout(edl, fps)
 
@@ -245,7 +317,7 @@ def build_clip_exact_readthrough(edl: list[dict], cut_segments: list[dict], fps:
             )
 
     for ws, we, w in words:
-        p = clip_at((ws + we) / 2.0)
+        p = clip_at((ws + we) / 2.0 + timestamp_bias_sec)
         if cur is None or p["clip_id"] != cur["clip_id"]:
             flush()
             cur = p
@@ -363,6 +435,12 @@ def main(argv=None) -> int:
     fps = args.fps
 
     records = analyze_seams(edl, sentences, fps)
+    try:
+        acoustic = analyze_boundaries_acoustically(edl, Path(args.video), out_dir, fps)
+        records = merge_flag_records(records, acoustic, edl, fps)
+        logger.info("聲學邊界檢查: %d 個 clip 的入點或出點貼著語音", len(acoustic))
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("聲學邊界檢查略過: %s", exc)
     markers = records_to_markers(records)
     review = None
 
