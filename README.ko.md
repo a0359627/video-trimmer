@@ -186,6 +186,27 @@ Antigravity에서는 다음 두 가지 방식으로 **Video Trimmer**를 사용�
 
 ---
 
+## Show Mode: 진행자 + 화면 밖 보이스 롤 (2채널 마이크 토크쇼 촬영본)
+
+감독이 화면 밖에서 두 번째 마이크로 대본의 "목소리 역할"(질문, 리액션)을 연기하고, 진행자가 대본을 벗어나 즉흥으로 말하며, 테이크가 잘게 나뉜 촬영본에 사용합니다. 모든 플래그는 기본적으로 꺼져 있어 기존 파이프라인은 그대로입니다.
+
+| 플래그 | 설명 |
+| :--- | :--- |
+| `--offscreen-channel auto\|left\|right` | 화면 밖 마이크 채널. 문장마다 `[HOST]`／`[OFFSCREEN]`／`[CUE]` 태그를 붙이고 역할이 바뀌는 지점에서 분리합니다. 카운트다운은 항상 제외, 화면 밖 대사는 모델이 판단합니다. |
+| `--prompt prompts/video_cut_prompt_show.md` | 쇼 전용 프롬프트. 대본의 목소리 역할과 일치하거나 진행자가 대답하는 화면 밖 질문·리액션은 별도 `offscreen` 클립으로 유지(XML 이름 접두사 `[場外]`), 대사 불러주기·지시·잡담은 제외. |
+| `--reference-script` | Mode C: 대본은 구조 참고용. Mode A의 단방향 소비와 커버리지 게이트 없음. |
+| `--assemble` | 청크 추론 후 텍스트 전용 전체 조립: 청크 간 테이크 선택, 섹션 라벨, 타임라인 순서. |
+| `--allow-reorder` | 조립 순서 유지. 순서 역전은 경고로만 처리. |
+| `--analysis-video` | 업로드와 분석에 프록시(예: 1080p) 사용. Whisper, 음향 고정, XML은 원본 기준. |
+| `--xml-only` | MP4 렌더링 생략. |
+| `--transcribe-only` | 전사와 역할 태깅만 수행. |
+
+```bash
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --analysis-video "proxy_1080p.mp4" \
+  --prompt skills/video-trimmer/prompts/video_cut_prompt_show.md --reference-script "script.txt" \
+  --offscreen-channel auto --assemble --allow-reorder --xml-only --suffix show
+```
+
 ## 라이선스 (License)
 
 이 프로젝트는 [MIT License](LICENSE)에 따라 라이선스가 부여됩니다.

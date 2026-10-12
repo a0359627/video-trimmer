@@ -225,6 +225,28 @@ chmod +x setup.sh
 
 ---
 
+## Show Mode：主持人 + 場外聲音角色（雙麥克風節目型拍帶）
+
+當導演在畫面外用第二支麥克風扮演腳本的「聲音角色」（提問、吐槽、反應），主持人會脫稿即興、片段切得很碎時，使用 Show Mode。所有旗標預設關閉，不影響原本流程。
+
+| 旗標 | 說明 |
+| :--- | :--- |
+| `--offscreen-channel auto\|left\|right` | 場外麥克風所在聲道；每句標成 `[HOST]`／`[OFFSCREEN]`／`[CUE]` 並在角色切換處拆句。倒數口令永遠剔除；場外台詞由模型依規則判定保留或剔除。 |
+| `--prompt prompts/video_cut_prompt_show.md` | 節目型主提示詞：對得上腳本聲音角色、或主持人接著回應的場外提問／反應保留為獨立 `offscreen` clip（XML 名稱前綴 `[場外]`）；餵詞、流程指令、閒聊剔除。 |
+| `--reference-script` | Mode C：腳本只作結構參考，不做 Mode A 的單向消耗與覆蓋率閘門，脫稿但切題的內容保留。 |
+| `--assemble` | 分段推論後再做一次純文字全片組裝：跨區段取捨、段落標籤、成片順序。 |
+| `--allow-reorder` | 允許成片順序與原片不同；順序顛倒改為警告。 |
+| `--analysis-video` | 上傳與分析用代理檔（例如 1080p），Whisper、聲學鎖定與 XML 仍以原檔為準。 |
+| `--xml-only` | 不渲染 MP4。 |
+| `--transcribe-only` | 只做轉錄與角色標記，用來先確認拍帶狀態。 |
+
+```bash
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --offscreen-channel auto --transcribe-only
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --analysis-video "proxy_1080p.mp4" \
+  --prompt skills/video-trimmer/prompts/video_cut_prompt_show.md --reference-script "script.txt" \
+  --offscreen-channel auto --assemble --allow-reorder --xml-only --suffix show
+```
+
 ## 自動交付成果 (Generated Deliverables)
 
 每次執行完成後，Agent 會在 `output/` 目錄下產出並驗證以下檔案：

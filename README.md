@@ -243,6 +243,28 @@ Pass a Google Drive URL directly without manually downloading large video files 
 
 ---
 
+## Show Mode: Host + Off-Screen Voice Role (two-microphone talk-show footage)
+
+Use Show Mode when the director performs the script's voice role (questions, reactions) from off camera on a second microphone channel, the host improvises off script and takes are fragmented. Every flag is off by default, so the standard pipeline is unchanged.
+
+| Flag | Description |
+| :--- | :--- |
+| `--offscreen-channel auto\|left\|right` | Mic channel of the off-screen voice. Sentences are tagged `[HOST]` / `[OFFSCREEN]` / `[CUE]` and split at role changes. Countdown cues are always dropped; off-screen lines are kept or dropped by the model. |
+| `--prompt prompts/video_cut_prompt_show.md` | Show master prompt: off-screen lines matching the script's voice role, or answered by the host, become separate `offscreen` clips (XML names prefixed `[場外]`); fed lines, directions and chatter are dropped. |
+| `--reference-script` | Mode C: the script is structural reference only, without Mode A monotonic consumption or the coverage gate, so on-topic improvisation survives. |
+| `--assemble` | Text-only global assembly pass after chunk inference: cross-chunk take arbitration, segment labels, timeline order. |
+| `--allow-reorder` | Keep the assembled order; out-of-order clips become a warning. |
+| `--analysis-video` | Upload and analyse a proxy (e.g. 1080p) while Whisper, acoustic locking and XML use the original. |
+| `--xml-only` | Skip the MP4 render. |
+| `--transcribe-only` | Transcription and role tagging only, to inspect the footage first. |
+
+```bash
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --offscreen-channel auto --transcribe-only
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --analysis-video "proxy_1080p.mp4" \
+  --prompt skills/video-trimmer/prompts/video_cut_prompt_show.md --reference-script "script.txt" \
+  --offscreen-channel auto --assemble --allow-reorder --xml-only --suffix show
+```
+
 ## Generated Deliverables
 
 For an input video `raw_footage.mp4`, the agent automatically creates an `output/` subdirectory next to the source video and delivers:

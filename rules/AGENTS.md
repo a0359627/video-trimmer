@@ -34,3 +34,10 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 ## 5. Default Static Multimodal Execution
 - Run `video_trimmer.py` in `<PLUGIN_ROOT>` in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) for fast, timeout-free inference.
 - Include `--agentic` only when the user explicitly requests Agentic Video Understanding mode.
+
+## 6. Show Mode (Host + Off-Screen Voice Role)
+- Use Show Mode only when the user describes a two-microphone shoot where the director performs the voice role off camera, or asks for it: `--offscreen-channel auto --prompt skills/video-trimmer/prompts/video_cut_prompt_show.md --reference-script <script> --assemble --allow-reorder`.
+- Run `--transcribe-only` first and show the user the `[HOST]` / `[OFFSCREEN]` / `[CUE]` sentence list before any cloud inference.
+- Keep retained off-screen lines as separate `offscreen` clips. Never hand-edit the Whisper cache except to replace a verified hallucinated span, and say so in the report.
+- Prefer `--analysis-video <1080p proxy>` for 4K sources; the XML must still reference the original file passed to `-i`.
+- `--xml-only` when the user only needs the NLE timeline.

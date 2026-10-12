@@ -186,6 +186,27 @@ chmod +x setup.sh
 
 ---
 
+## Show Mode：主持人 + 画外声音角色（双麦克风节目型素材）
+
+当导演在画面外用第二支麦克风扮演脚本的“声音角色”（提问、吐槽、反应），主持人脱稿即兴、片段切得很碎时，使用 Show Mode。所有旗标默认关闭，不影响原有流程。
+
+| 旗标 | 说明 |
+| :--- | :--- |
+| `--offscreen-channel auto\|left\|right` | 画外麦克风所在声道；每句标成 `[HOST]`／`[OFFSCREEN]`／`[CUE]` 并在角色切换处拆句。倒数口令永远剔除，画外台词由模型依规则判定。 |
+| `--prompt prompts/video_cut_prompt_show.md` | 节目型主提示词：对得上脚本声音角色、或主持人接着回应的画外提问／反应保留为独立 `offscreen` clip（XML 名称前缀 `[場外]`）；喂词、流程指令、闲聊剔除。 |
+| `--reference-script` | Mode C：脚本只作结构参考，不做 Mode A 的单向消耗与覆盖率闸门。 |
+| `--assemble` | 分段推理后再做一次纯文本全片组装：跨区段取舍、段落标签、成片顺序。 |
+| `--allow-reorder` | 允许成片顺序与原片不同；顺序颠倒改为警告。 |
+| `--analysis-video` | 上传与分析用代理文件（如 1080p），Whisper、声学锁定与 XML 仍以原文件为准。 |
+| `--xml-only` | 不渲染 MP4。 |
+| `--transcribe-only` | 只做转录与角色标记。 |
+
+```bash
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --analysis-video "proxy_1080p.mp4" \
+  --prompt skills/video-trimmer/prompts/video_cut_prompt_show.md --reference-script "script.txt" \
+  --offscreen-channel auto --assemble --allow-reorder --xml-only --suffix show
+```
+
 ## 许可证 (License)
 
 本项目采用 [MIT License](LICENSE) 授权。

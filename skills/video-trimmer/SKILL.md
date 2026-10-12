@@ -157,6 +157,30 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
 | `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
+| `--prompt` | | `None` | Show Mode: alternative master prompt file (e.g. `prompts/video_cut_prompt_show.md`). |
+| `--reference-script` | | `None` | Show Mode (Mode C): script used only as structural reference; no Mode A monotonic consumption or coverage gate. |
+| `--offscreen-channel` | | `none` | Show Mode: `auto` / `left` / `right` mic channel of the off-screen voice; tags sentences `[HOST]` / `[OFFSCREEN]` / `[CUE]` and splits at role changes. |
+| `--analysis-video` | | `None` | Upload and analyse this proxy (e.g. 1080p) while Whisper, acoustic locking and XML use the `-i` original. |
+| `--assemble` | | `False` | Show Mode: text-only global assembly pass after chunk inference (cross-chunk take arbitration, segment labels, timeline order). |
+| `--allow-reorder` | | `False` | Keep `timeline_position` order; out-of-order clips become a warning instead of a fatal violation. |
+| `--xml-only` | | `False` | Skip the MP4 render; still writes JSON, CSV, XML, FCPXML and the audit report. |
+| `--transcribe-only` | | `False` | Stop after Whisper transcription and sentence merging (with role tags); no upload, no Gemini call. |
+
+### Show Mode (host + off-screen voice role on a second microphone)
+
+Use when the director performs the script's voice role (questions, reactions) from off camera on a separate microphone channel, the host improvises off script, and takes are fragmented. Defaults are unchanged when the flags are omitted.
+
+```bash
+# 1. Inspect the footage first (local, free): sentence list with [HOST]/[OFFSCREEN]/[CUE] tags
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/raw.mp4" --offscreen-channel auto --transcribe-only
+
+# 2. Full run on a 1080p proxy, XML only, script as reference
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/raw.mp4" --analysis-video "/path/proxy_1080p.mp4" \
+  --prompt skills/video-trimmer/prompts/video_cut_prompt_show.md --reference-script "/path/script.txt" \
+  --offscreen-channel auto --assemble --allow-reorder --xml-only --suffix show
+```
+
+Role rules live in `prompts/video_cut_prompt_show.md`: off-screen lines that match the script's voice role, or that the host answers, are kept as separate `role: offscreen` clips (named `[場外] ...` in the XML); countdowns, fed lines, directions and chatter are dropped. Only `[CUE]` sentences are excluded from acoustic locking by the engine; every other decision is the model's and is auditable in `<base>_<tag>_assembly_raw.json` and `<base>_<tag>_chunks_raw.json`.
 
 ---
 

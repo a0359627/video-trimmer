@@ -186,6 +186,27 @@ Antigravity では、以下の 2 つの方法で **Video Trimmer** を操作で�
 
 ---
 
+## Show Mode：司会者 + 画面外のボイスロール（2 マイク収録のトーク番組素材）
+
+ディレクターが画面外から第 2 のマイクで台本の「声の役」（質問・ツッコミ・リアクション）を演じ、司会者が台本から離れて即興で話し、テイクが細かく分かれている素材に使います。フラグはすべてデフォルトでオフで、従来のパイプラインは変わりません。
+
+| フラグ | 説明 |
+| :--- | :--- |
+| `--offscreen-channel auto\|left\|right` | 画面外マイクのチャンネル。各文に `[HOST]`／`[OFFSCREEN]`／`[CUE]` を付け、役が切り替わる位置で分割します。カウントダウンは常に除外、画面外の台詞はモデルが判定します。 |
+| `--prompt prompts/video_cut_prompt_show.md` | 番組用プロンプト。台本の声の役に一致する、または司会者が応答する画面外の質問・リアクションは独立した `offscreen` クリップとして保持（XML 名は `[場外]` 接頭辞）。台詞の先読み、指示、雑談は除外。 |
+| `--reference-script` | Mode C：台本は構成の参考のみ。Mode A の単方向消費とカバレッジゲートは無効。 |
+| `--assemble` | チャンク推論後にテキストのみの全体アセンブリを実行：チャンク間のテイク裁定、セクション名、タイムライン順。 |
+| `--allow-reorder` | アセンブリ順を維持。順序の入れ替わりは警告扱い。 |
+| `--analysis-video` | アップロードと解析にプロキシ（例：1080p）を使用。Whisper、音響ロック、XML は元ファイル基準。 |
+| `--xml-only` | MP4 をレンダリングしない。 |
+| `--transcribe-only` | 文字起こしと役タグ付けのみ。 |
+
+```bash
+python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --analysis-video "proxy_1080p.mp4" \
+  --prompt skills/video-trimmer/prompts/video_cut_prompt_show.md --reference-script "script.txt" \
+  --offscreen-channel auto --assemble --allow-reorder --xml-only --suffix show
+```
+
 ## ライセンス (License)
 
 本プロジェクトは [MIT License](LICENSE) の下で提供されています。
