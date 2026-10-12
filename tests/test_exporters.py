@@ -49,6 +49,21 @@ class TestGenerateFcp7Xml(unittest.TestCase):
             assert audio_clip.find("sourcetrack/trackindex").text == "1"
             assert audio_clip.find("link/linkclipref").text == "clipitem-v1"
 
+    def test_sequence_markers_are_written_and_escaped(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "take1.mp4"
+            video_path.write_bytes(b"")
+            xml_path = tmp_path / "out.xml"
+            markers = [{"name": "確認 <A&B>", "comment": "原片 00:01:00:00 | 說明", "frame": 120}]
+            generate_fcp7_xml(_sample_edl(), video_path, total_source_dur=30.0, output_xml_path=xml_path,
+                               width=1920, height=1080, fps=24.0, audio_channels=2, markers=markers)
+            root = ET.parse(xml_path).getroot()
+            m = root.findall("sequence/marker")
+            assert len(m) == 1
+            assert m[0].findtext("name") == "確認 <A&B>"
+            assert m[0].findtext("in") == "120" and m[0].findtext("out") == "-1"
+
     def test_timecode_conversion_is_frame_accurate(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

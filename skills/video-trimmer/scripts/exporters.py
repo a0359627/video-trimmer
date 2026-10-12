@@ -39,12 +39,14 @@ def format_path_for_fcp7(system_path):
 
 
 def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976,
-                      audio_channels=None):
+                      audio_channels=None, markers=None):
     """產生 Premiere Pro / DaVinci Resolve 相容的 FCP 7 XML (xmeml v4)。
 
     結構比照 Premiere Pro 自己匯出的 FCP7 XML：sequence 有 duration 與 timecode、file 有完整
     media 描述（video/audio samplecharacteristics、channelcount）、每個聲道一條音軌並帶
     sourcetrack/trackindex，video 與 audio clipitem 以 link 互相連結，名稱做 XML 跳脫。
+    markers: 選用，[{"name": str, "comment": str, "frame": int}]，寫成 sequence marker，
+    Premiere 匯入後顯示在時間軸上方，剪輯師可直接跳到要確認的位置。
     """
     video_path = Path(video_path)
     timebase = int(round(fps))
@@ -232,6 +234,20 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
     x += [
         '      </audio>',
         '    </media>',
+    ]
+
+    for m in (markers or []):
+        frame = max(0, int(m.get("frame", 0)))
+        x += [
+            '    <marker>',
+            f'      <name>{_xml_escape(str(m.get("name", "")))}</name>',
+            f'      <comment>{_xml_escape(str(m.get("comment", "")))}</comment>',
+            f'      <in>{frame}</in>',
+            f'      <out>{int(m["out"]) if m.get("out") is not None else -1}</out>',
+            '    </marker>',
+        ]
+
+    x += [
         '  </sequence>',
         '</xmeml>',
     ]
