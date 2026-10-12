@@ -422,6 +422,27 @@ def _run(args):
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     audio, sr = sf.read(str(temp_wav))
 
+    # Show Mode：雙麥克風時，主持人 clip 用主持人聲道、場外 clip 用場外聲道做聲學鎖定，
+    # 否則另一支麥克風的聲音會讓入點提早到前一個人的尾音上（HEAD_BLEED）。
+    role_audio = {}
+    offscreen_setting = str(getattr(args, "offscreen_channel", "none") or "none").lower()
+    if offscreen_setting != "none":
+        try:
+            from .roles import detect_offscreen_channel, extract_stereo_wav, load_stereo_audio
+
+            temp_stereo = out_dir / f"temp_{base_name}_stereo.wav"
+            extract_stereo_wav(video_path, temp_stereo)
+            stereo, sr_st = load_stereo_audio(temp_stereo)
+            temp_stereo.unlink(missing_ok=True)
+            if stereo.shape[1] >= 2 and sr_st == sr:
+                off_side = detect_offscreen_channel(stereo) if offscreen_setting == "auto" else offscreen_setting
+                off_idx = 0 if off_side == "left" else 1
+                role_audio = {"host": stereo[:, 1 - off_idx].copy(), "offscreen": stereo[:, off_idx].copy()}
+                logger.info("    [聲道鎖定] 主持人 clip 用 %s 聲道、場外 clip 用 %s 聲道做聲學邊界",
+                            "右" if off_idx == 0 else "左", "左" if off_idx == 0 else "右")
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("    [聲道鎖定略過] %s", exc)
+
     if whisper_units and isinstance(model_edl, dict) and model_edl.get("final_edl"):
         model_edl["final_edl"] = deduplicate_and_sort_clips(
             clips=model_edl["final_edl"],
@@ -472,8 +493,10 @@ def _run(args):
         prev_sentence_end = su["prev_sentence_end"]
         next_sentence_start = su["next_sentence_start"]
 
+        clip_role = "offscreen" if str(c.get("role", "host")).lower() == "offscreen" else "host"
+        lock_audio = role_audio.get(clip_role, audio) if role_audio else audio
         tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds_locked(
-            audio, sr, t_first, t_last, total_dur, transcript=transcript, pacing=args.pacing,
+            lock_audio, sr, t_first, t_last, total_dur, transcript=transcript, pacing=args.pacing,
             prev_sentence_end=prev_sentence_end, next_sentence_start=next_sentence_start
         )
         if tight_out <= tight_in:
