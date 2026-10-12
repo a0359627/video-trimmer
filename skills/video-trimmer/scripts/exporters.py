@@ -1,103 +1,242 @@
 """輸出格式產生：FCP 7 XML、FCPXML、CSV。"""
 
+import json
+import subprocess
+import urllib.parse
 from pathlib import Path
+from xml.sax.saxutils import escape as _xml_escape
+
+AUDIO_DEPTH = 16
+AUDIO_SAMPLE_RATE = 48000
 
 
-def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976):
-    """產生 Premiere Pro / DaVinci Resolve 相容的 FCP 7 XML (xmeml v4)"""
+def _probe_audio_channels(video_path, default=2):
+    """Return the channel count of the first audio stream (ffprobe), or `default` when unknown."""
+    try:
+        res = subprocess.run(
+            ["ffprobe", "-v", "error", "-select_streams", "a:0", "-show_entries", "stream=channels",
+             "-of", "json", str(video_path)],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True, timeout=30, check=False,
+        )
+        streams = json.loads(res.stdout or "{}").get("streams") or []
+        ch = int(streams[0].get("channels", 0)) if streams else 0
+        return ch if ch > 0 else default
+    except Exception:  # noqa: BLE001
+        return default
+
+
+def format_path_for_fcp7(system_path):
+    """Absolute path -> `file://localhost/...` URI as Premiere Pro writes it.
+
+    Premiere Pro and DaVinci Resolve both read `file://localhost/<percent-encoded path>`;
+    on Windows the drive colon is encoded too (`C%3A/Users/...`), which is the form Premiere
+    itself exports. The empty-authority form `file:///C:/...` is not accepted by Premiere.
+    """
+    path_str = Path(system_path).resolve().as_posix()
+    if not path_str.startswith("/"):
+        path_str = "/" + path_str
+    return "file://localhost" + urllib.parse.quote(path_str, safe="/")
+
+
+def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976,
+                      audio_channels=None):
+    """產生 Premiere Pro / DaVinci Resolve 相容的 FCP 7 XML (xmeml v4)。
+
+    結構比照 Premiere Pro 自己匯出的 FCP7 XML：sequence 有 duration 與 timecode、file 有完整
+    media 描述（video/audio samplecharacteristics、channelcount）、每個聲道一條音軌並帶
+    sourcetrack/trackindex，video 與 audio clipitem 以 link 互相連結，名稱做 XML 跳脫。
+    """
+    video_path = Path(video_path)
     timebase = int(round(fps))
+    ntsc = "TRUE" if abs(fps - timebase) > 1e-3 else "FALSE"
+    channels = int(audio_channels) if audio_channels else _probe_audio_channels(video_path)
+    channels = max(1, min(channels, 8))
 
     def s2f(sec):
         return int(round(sec * fps))
 
-    xml_lines = [
+    def rate_xml(indent):
+        return f'{indent}<rate><timebase>{timebase}</timebase><ntsc>{ntsc}</ntsc></rate>'
+
+    file_name = _xml_escape(video_path.name)
+    file_url = format_path_for_fcp7(video_path)
+    file_frames = s2f(total_source_dur)
+    reel_name = _xml_escape(video_path.stem)
+
+    def file_node_full(indent):
+        i = indent
+        return [
+            f'{i}<file id="file-1">',
+            f'{i}  <name>{file_name}</name>',
+            f'{i}  <pathurl>{file_url}</pathurl>',
+            rate_xml(i + "  "),
+            f'{i}  <duration>{file_frames}</duration>',
+            f'{i}  <timecode>',
+            rate_xml(i + "    "),
+            f'{i}    <string>00:00:00:00</string>',
+            f'{i}    <frame>0</frame>',
+            f'{i}    <displayformat>NDF</displayformat>',
+            f'{i}    <reel><name>{reel_name}</name></reel>',
+            f'{i}  </timecode>',
+            f'{i}  <media>',
+            f'{i}    <video>',
+            f'{i}      <samplecharacteristics>',
+            rate_xml(i + "        "),
+            f'{i}        <width>{width}</width>',
+            f'{i}        <height>{height}</height>',
+            f'{i}        <anamorphic>FALSE</anamorphic>',
+            f'{i}        <pixelaspectratio>square</pixelaspectratio>',
+            f'{i}        <fielddominance>none</fielddominance>',
+            f'{i}      </samplecharacteristics>',
+            f'{i}    </video>',
+            f'{i}    <audio>',
+            f'{i}      <samplecharacteristics>',
+            f'{i}        <depth>{AUDIO_DEPTH}</depth>',
+            f'{i}        <samplerate>{AUDIO_SAMPLE_RATE}</samplerate>',
+            f'{i}      </samplecharacteristics>',
+            f'{i}      <channelcount>{channels}</channelcount>',
+            f'{i}    </audio>',
+            f'{i}  </media>',
+            f'{i}</file>',
+        ]
+
+    # Timeline placement (frames), shared by video and audio clipitems
+    placements = []
+    cursor = 0
+    for clip in edl:
+        in_frame = s2f(clip["source_in"])
+        out_frame = s2f(clip["source_out"])
+        dur_frame = max(1, out_frame - in_frame)
+        placements.append((in_frame, in_frame + dur_frame, cursor, cursor + dur_frame))
+        cursor += dur_frame
+    total_frames = cursor
+
+    def clip_name(clip):
+        return _xml_escape(f'Clip_{int(clip["clip_id"]):02d}_{str(clip.get("topic", ""))[:15]}')
+
+    def link_xml(indent, clip_index):
+        """Links between the video clipitem and every audio clipitem of the same cut."""
+        lines = [
+            f'{indent}<link>',
+            f'{indent}  <linkclipref>clipitem-v{clip_index}</linkclipref>',
+            f'{indent}  <mediatype>video</mediatype>',
+            f'{indent}  <trackindex>1</trackindex>',
+            f'{indent}  <clipindex>{clip_index}</clipindex>',
+            f'{indent}</link>',
+        ]
+        for ch in range(1, channels + 1):
+            lines += [
+                f'{indent}<link>',
+                f'{indent}  <linkclipref>clipitem-a{ch}-{clip_index}</linkclipref>',
+                f'{indent}  <mediatype>audio</mediatype>',
+                f'{indent}  <trackindex>{ch}</trackindex>',
+                f'{indent}  <clipindex>{clip_index}</clipindex>',
+                f'{indent}  <groupindex>1</groupindex>',
+                f'{indent}</link>',
+            ]
+        return lines
+
+    seq_name = _xml_escape(f"{video_path.stem}_TrimmerCut")
+    x = [
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<!DOCTYPE xmeml>',
         '<xmeml version="4">',
-        '  <project>',
-        f'    <name>VideoTrimmer_{video_path.stem}</name>',
-        '    <children>',
-        '      <sequence id="sequence-1">',
-        f'        <name>{video_path.stem}_TrimmerCut</name>',
-        f'        <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
-        '        <media>',
-        '          <video>',
-        '            <format>',
-        '              <samplecharacteristics>',
-        f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
-        f'                <width>{width}</width>',
-        f'                <height>{height}</height>',
-        '                <pixelaspectratio>square</pixelaspectratio>',
-        '              </samplecharacteristics>',
-        '            </format>',
-        '            <track>'
+        '  <sequence id="sequence-1">',
+        f'    <name>{seq_name}</name>',
+        f'    <duration>{total_frames}</duration>',
+        rate_xml("    "),
+        '    <timecode>',
+        rate_xml("      "),
+        '      <string>00:00:00:00</string>',
+        '      <frame>0</frame>',
+        '      <displayformat>NDF</displayformat>',
+        '    </timecode>',
+        '    <in>-1</in>',
+        '    <out>-1</out>',
+        '    <media>',
+        '      <video>',
+        '        <format>',
+        '          <samplecharacteristics>',
+        rate_xml("            "),
+        f'            <width>{width}</width>',
+        f'            <height>{height}</height>',
+        '            <anamorphic>FALSE</anamorphic>',
+        '            <pixelaspectratio>square</pixelaspectratio>',
+        '            <fielddominance>none</fielddominance>',
+        '          </samplecharacteristics>',
+        '        </format>',
+        '        <track>',
     ]
 
-    timeline_cursor = 0
-    for idx, clip in enumerate(edl):
-        in_frame = s2f(clip["source_in"])
-        out_frame = s2f(clip["source_out"])
-        dur_frame = max(1, out_frame - in_frame)
-        start_frame = timeline_cursor
-        end_frame = timeline_cursor + dur_frame
-        timeline_cursor = end_frame
+    for idx, (clip, (in_f, out_f, start_f, end_f)) in enumerate(zip(edl, placements), start=1):
+        x += [
+            f'          <clipitem id="clipitem-v{idx}">',
+            '            <masterclipid>masterclip-1</masterclipid>',
+            f'            <name>{clip_name(clip)}</name>',
+            '            <enabled>TRUE</enabled>',
+            f'            <duration>{file_frames}</duration>',
+            rate_xml("            "),
+            f'            <start>{start_f}</start>',
+            f'            <end>{end_f}</end>',
+            f'            <in>{in_f}</in>',
+            f'            <out>{out_f}</out>',
+        ]
+        x += file_node_full("            ") if idx == 1 else ['            <file id="file-1"/>']
+        x += ['            <sourcetrack><mediatype>video</mediatype></sourcetrack>']
+        x += link_xml("            ", idx)
+        x += ['          </clipitem>']
 
-        xml_lines.extend([
-            f'              <clipitem id="clipitem-v{idx+1}">',
-            f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
-            f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
-            f'                <in>{in_frame}</in>',
-            f'                <out>{out_frame}</out>',
-            f'                <start>{start_frame}</start>',
-            f'                <end>{end_frame}</end>',
-            f'                <file id="file-1">',
-            f'                  <name>{video_path.name}</name>',
-            f'                  <pathurl>{video_path.resolve().as_uri()}</pathurl>',
-            f'                  <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
-            f'                  <duration>{s2f(total_source_dur)}</duration>',
-            '                </file>',
-            '              </clipitem>'
-        ])
+    x += [
+        '          <enabled>TRUE</enabled>',
+        '          <locked>FALSE</locked>',
+        '        </track>',
+        '      </video>',
+        '      <audio>',
+        '        <format>',
+        '          <samplecharacteristics>',
+        f'            <depth>{AUDIO_DEPTH}</depth>',
+        f'            <samplerate>{AUDIO_SAMPLE_RATE}</samplerate>',
+        '          </samplecharacteristics>',
+        '        </format>',
+    ]
 
-    xml_lines.extend([
-        '            </track>',
-        '          </video>',
-        '          <audio>',
-        '            <track>'
-    ])
+    for ch in range(1, channels + 1):
+        x += ['        <track>']
+        for idx, (clip, (in_f, out_f, start_f, end_f)) in enumerate(zip(edl, placements), start=1):
+            x += [
+                f'          <clipitem id="clipitem-a{ch}-{idx}">',
+                '            <masterclipid>masterclip-1</masterclipid>',
+                f'            <name>{clip_name(clip)}</name>',
+                '            <enabled>TRUE</enabled>',
+                f'            <duration>{file_frames}</duration>',
+                rate_xml("            "),
+                f'            <start>{start_f}</start>',
+                f'            <end>{end_f}</end>',
+                f'            <in>{in_f}</in>',
+                f'            <out>{out_f}</out>',
+                '            <file id="file-1"/>',
+                '            <sourcetrack>',
+                '              <mediatype>audio</mediatype>',
+                f'              <trackindex>{ch}</trackindex>',
+                '            </sourcetrack>',
+            ]
+            x += link_xml("            ", idx)
+            x += ['          </clipitem>']
+        x += [
+            '          <enabled>TRUE</enabled>',
+            '          <locked>FALSE</locked>',
+            f'          <outputchannelindex>{ch}</outputchannelindex>',
+            '        </track>',
+        ]
 
-    timeline_cursor = 0
-    for idx, clip in enumerate(edl):
-        in_frame = s2f(clip["source_in"])
-        out_frame = s2f(clip["source_out"])
-        dur_frame = max(1, out_frame - in_frame)
-        start_frame = timeline_cursor
-        end_frame = timeline_cursor + dur_frame
-        timeline_cursor = end_frame
+    x += [
+        '      </audio>',
+        '    </media>',
+        '  </sequence>',
+        '</xmeml>',
+    ]
 
-        xml_lines.extend([
-            f'              <clipitem id="clipitem-a{idx+1}">',
-            f'                <name>Clip_{clip["clip_id"]:02d}_{clip["topic"][:15]}</name>',
-            f'                <rate><timebase>{timebase}</timebase><ntsc>TRUE</ntsc></rate>',
-            f'                <in>{in_frame}</in>',
-            f'                <out>{out_frame}</out>',
-            f'                <start>{start_frame}</start>',
-            f'                <end>{end_frame}</end>',
-            f'                <file id="file-1"/>',
-            '              </clipitem>'
-        ])
-
-    xml_lines.extend([
-        '            </track>',
-        '          </audio>',
-        '        </media>',
-        '      </sequence>',
-        '    </children>',
-        '  </project>',
-        '</xmeml>'
-    ])
-
-    Path(output_xml_path).write_text('\n'.join(xml_lines), encoding='utf-8')
+    Path(output_xml_path).write_text('\n'.join(x) + '\n', encoding='utf-8')
 
 
 def generate_fcpxml(edl, video_path, total_source_dur, total_out_dur, output_fcpxml_path, fps=23.976):

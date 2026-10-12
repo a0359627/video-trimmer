@@ -36,7 +36,18 @@ class TestGenerateFcp7Xml(unittest.TestCase):
 
             root = ET.parse(xml_path).getroot()
             assert root.tag == "xmeml"
-            assert len(root.findall(".//clipitem")) == len(_sample_edl()) * 2
+            # one video clipitem per cut plus one audio clipitem per cut per channel (stereo default)
+            assert len(root.findall(".//video//clipitem")) == len(_sample_edl())
+            assert len(root.findall(".//audio/track")) == 2
+            assert len(root.findall(".//audio//clipitem")) == len(_sample_edl()) * 2
+            seq = root.find("sequence")
+            assert int(seq.findtext("duration")) == sum(round((c["source_out"] - c["source_in"]) * 24.0) for c in _sample_edl())
+            pathurl = root.find(".//file/pathurl").text
+            assert pathurl.startswith("file://localhost/") and "file:///" not in pathurl
+            assert root.find(".//file/media/audio/channelcount").text == "2"
+            audio_clip = root.find(".//audio//clipitem")
+            assert audio_clip.find("sourcetrack/trackindex").text == "1"
+            assert audio_clip.find("link/linkclipref").text == "clipitem-v1"
 
     def test_timecode_conversion_is_frame_accurate(self):
         with tempfile.TemporaryDirectory() as tmp:
