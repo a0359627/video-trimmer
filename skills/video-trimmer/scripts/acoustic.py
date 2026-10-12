@@ -164,6 +164,12 @@ def refine_speech_bounds_locked(
     target_in = max(0.0, true_speech_start - breath_in)
     if prev_sentence_end is not None:
         target_in = max(target_in, prev_sentence_end)
+    # 保護第一個字：聲學起音搜尋若把入點推到 Whisper 首字起點之後 0.3 秒以上（首字很輕、或底噪估計偏高時），
+    # 代表會切進第一個字，改回首字起點前一點點；多留一點氣息比吃掉第一個字好。
+    if target_in > t_first + 0.30:
+        target_in = max(0.0, t_first - 0.06)
+        if prev_sentence_end is not None:
+            target_in = max(target_in, prev_sentence_end)
     final_in = round(target_in, 2)
 
     in_m = round(t_first - final_in, 2)
