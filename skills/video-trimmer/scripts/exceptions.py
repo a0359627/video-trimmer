@@ -1,21 +1,22 @@
-"""video-trimmer 自訂例外階層。
+"""Custom exception hierarchy for Video Trimmer.
 
-各模組內部一律 raise 這裡定義的例外，不呼叫 sys.exit()；
-只有 scripts/video_trimmer.py 的 main() 統一 catch 並決定 exit code。
+ASD-STE100:
+Raise these exceptions inside internal modules instead of calling sys.exit().
+Catch them at the top-level CLI entrypoint in scripts/video_trimmer.py.
 """
 
 
 class VideoTrimmerError(Exception):
-    """所有 video-trimmer 自訂例外的基底類別。"""
+    """Base exception class for all Video Trimmer errors."""
 
 
 class FFmpegError(VideoTrimmerError):
-    """ffmpeg / ffprobe 呼叫失敗。"""
+    """Raised when an ffmpeg or ffprobe command fails."""
 
 
 class GeminiAPIError(VideoTrimmerError):
-    """Gemini API（上傳、推論、Interactions）呼叫或回應解析失敗。"""
+    """Raised when a Vertex AI Gemini API call or JSON response fails."""
 
 
 class InvalidInputError(VideoTrimmerError):
-    """使用者提供的輸入（檔案路徑、副檔名等）不合法。"""
+    """Raised when a user-supplied file path, URL, or extension is invalid."""

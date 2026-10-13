@@ -11,7 +11,7 @@
 
 ## 项目概览 (Overview)
 
-**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**Whisper 逐字声学时间戳**（`mlx-whisper`）、**五层统一剪辑架构（5-Layer Unified Architecture）** 与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、口误与静音停顿，同时保护连贯长句不被切碎，并导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.edl`, `.csv`）、8 维度质量审计报告（`.md`, `.json`）及渲染完成的 MP4 视频。
+**Video Trimmer** 是面向口播视频、教程与演讲录像的 AI 自动粗剪引擎。系统结合 **Google Vertex AI Gemini 3.8 Flash** 多模态视频推理、**Whisper 逐字声学时间戳**（`mlx-whisper`）、**五层统一剪辑架构（5-Layer Unified Architecture）** 与 **声学起音锁定（Acoustic Onset Snapping）**。每次运行会自动剔除 NG 重录、口误与静音停顿，同时保护连贯长句不被切碎，并导出专业 NLE 时间线（`.xml`, `.fcpxml`, `.csv`）、8 维度质量审计报告（`.md`, `.json`）及渲染完成的 MP4 视频。
 
 ---
 
@@ -47,7 +47,7 @@ flowchart TD
 
     subgraph L3_L4["Layer 3 & 4: 逐字边界精修、跨片段合一与声学起音锁定"]
         L3["Layer 3: 子句展开与逐字稿边界精修<br/>(resolve_clip_sub_units + _trim_matched_words_by_transcript)"]:::stage3Style
-        L4["Layer 4: 跨片段连贯小句无缝合一<br/>(coalesce_adjacent_sub_units, 字间距 <0.40s 消除跳接)"]:::stage3Style
+        L4["Layer 4: 跨片段连贯小句无缝合一<br/>(coalesce_adjacent_sub_units, 字间距 <0.65s 消除跳接)"]:::stage3Style
         AC["声学起音锁定与词尾塞音保护<br/>(发声前 80ms 锁定 + CPS 动态尾韵保底 >=t_last)"]:::stage3Style
         L3 --> L4 --> AC
     end
@@ -59,8 +59,8 @@ flowchart TD
     end
 
     subgraph Deliverables["最终交付成果 (<input_dir>/output/)"]
-        OUT_MP4["交付成果: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox 硬件加速 + 15ms 等功率微淡化)"]:::outputStyle
-        OUT_NLE["交付成果: 多平台 NLE 剪辑时间线<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_MP4["交付成果: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox 硬件加速 + 20ms 等功率微淡化)"]:::outputStyle
+        OUT_NLE["交付成果: 多平台 NLE 剪辑时间线<br/>(.xml / .fcpxml / .csv)"]:::outputStyle
         OUT_REP["交付成果: 8 维度质量审计报告<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
     end
 
@@ -86,13 +86,13 @@ flowchart TD
 3. **第三层：子句展开与逐字稿边界精修 (`resolve_clip_sub_units`)**：
    - 将多句跨度展开为独立的 `Sentence ID` 子单元，并依据 `transcript` 自动精修首尾词边界（`_trim_matched_words_by_transcript`，支持最右侧子序列锚定与短词对齐）。
 4. **第四层：跨片段连贯小句无缝合一 (`coalesce_adjacent_sub_units`)**：
-   - 当相邻片段为连续 `Sentence ID`（中间未跳过 NG 句且边界未经口误裁剪）且物理字间距 `< 0.40s` 时，自动合并为单一连续片段，消除长句内部的跳接（Jump-Cut）。
+   - 当相邻片段为连续 `Sentence ID`（中间未跳过 NG 句且边界未经口误裁剪）且物理字间距 `< 0.65s`（默认值；Show Mode 可用 `--keep-pause-sec` 覆盖）时，自动合并为单一连续片段，消除长句内部的跳接（Jump-Cut）。
 5. **第五层：物理时间轴确定性自愈与 8 维度双轨质量审计 (`edl_auditor.py`)**：
    - 强制按时间单调递增排序（`source_in < source_out` 且 `c[i].source_out <= c[i+1].source_in`）、剔除被包裹的冗余子片段、消除相邻边界微重叠、强制保底 `source_out >= t_last`、合并 `< 0.45s` 闪帧微碎切，并结合 Whisper 与 Gemini 双轨文本比对生成 `<base>_<tag>_edl_report.md` 与含顶层 `agent_verdict` 质量门禁的 `<base>_<tag>_edl_report.json`。
-6. **声学起音锁定、15 ms 等功率微交叉淡化与关键帧硬件加速渲染 (`acoustic.py` / `render.py`)**：
-   - 将剪辑入点锁定在声带振动前 80 ms；成片渲染采用每片段前置 `-ss` / `-to` 关键帧快速定位（跳过废片解码）、Apple Silicon `VideoToolbox` 硬件编解码（`-hwaccel videotoolbox` + `h264_videotoolbox`，支持 `libx264` 自动降级）、1 秒 GOP（`-g 30`）与 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 与 `afade=t=out:d=0.015:curve=qsin`）。
+6. **声学起音锁定、20 ms 等功率微交叉淡化与关键帧硬件加速渲染 (`acoustic.py` / `render.py`)**：
+   - 将剪辑入点锁定在声带振动前 80 ms；成片渲染采用每片段前置 `-ss` / `-to` 关键帧快速定位（跳过废片解码）、Apple Silicon `VideoToolbox` 硬件编解码（`-hwaccel videotoolbox` + `h264_videotoolbox`，支持 `libx264` 自动降级）、1 秒 GOP（`-g 30`）与 20 ms 等功率淡入淡出（`afade=t=in:d=0.020:curve=iqsin` 与 `afade=t=out:d=0.020:curve=qsin`）。
 7. **Agent Plugins 1.0 标准架构与多平台 NLE 时间线导出**：
-   - 核心代码与提示词位于 `skills/video-trimmer/scripts/` 与 `skills/video-trimmer/prompts/`（SSOT），Agent 专用 CLI 参数定义于 `skills/video-trimmer/SKILL.md`，支持导出 **FCP7 XML**、**FCPXML**、**CMX 3600 EDL** 与 **CSV**。
+   - 核心代码与提示词位于 `skills/video-trimmer/scripts/` 与 `skills/video-trimmer/prompts/`（SSOT），Agent 专用 CLI 参数定义于 `skills/video-trimmer/SKILL.md`，支持导出 **FCP7 XML**、**FCPXML** 与 **CSV**。
 
 ---
 

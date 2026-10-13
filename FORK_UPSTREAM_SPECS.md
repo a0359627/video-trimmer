@@ -73,7 +73,7 @@
 3. **Layer 3: 子單元展開與字級微調 (`transcribe.py`)**
    - 依據 Layer 2 仲裁出的 `Sentence ID` 映射至 Whisper 字級時間戳，並受連續發音與 Blooper 白名單保護。
 4. **Layer 4: 全域跨鏡頭縫合與匯出 (`exporters.py` & `render.py`)**
-   - 相鄰連續鏡頭物理間隔 `< 0.40s` 且無跳句者自動縫合，消除人工跳接。
+   - 相鄰連續鏡頭物理間隔 `< 0.65s`（`coalesce_adjacent_sub_units` 預設值；Show Mode `--keep-pause-sec` 可覆寫）且無跳句者自動縫合，消除人工跳接。
    - 剪輯出入點嚴格套用等功率微淡入淡出（`iqsin`/`qsin`，長度為 `constants.CROSSFADE_DURATION_SEC` = 0.020 秒，極短 clip 縮為 `max(0.005, clip_dur / 4)`；`oqsin` 不是合法的 FFmpeg afade curve），杜絕音訊爆音（Pop Noise）。
    - 匯出全域唯一 ID 的 FCP7 XML (`xmeml v5`)、FCPXML 1.9/1.10 與 EDL。
 

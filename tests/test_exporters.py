@@ -85,6 +85,27 @@ class TestGenerateFcp7Xml(unittest.TestCase):
             second_clip = root.findall(".//video//clipitem")[1]
             assert int(second_clip.find("start").text) == round(15.0 * fps) - round(10.0 * fps)
 
+    def test_ntsc_flag_reflects_fractional_vs_integer_fps(self):
+        for profile in XML_PROFILES:
+            with self.subTest(xml_profile=profile), tempfile.TemporaryDirectory() as tmp:
+                tmp_path = Path(tmp)
+                video_path = tmp_path / "take1.mp4"
+                video_path.write_bytes(b"")
+                xml_ntsc = tmp_path / "ntsc.xml"
+                xml_pal = tmp_path / "pal.xml"
+
+                generate_fcp7_xml(_sample_edl(), video_path, total_source_dur=30.0, output_xml_path=xml_ntsc,
+                                   width=1920, height=1080, fps=29.97, xml_profile=profile)
+                generate_fcp7_xml(_sample_edl(), video_path, total_source_dur=30.0, output_xml_path=xml_pal,
+                                   width=1920, height=1080, fps=25.0, xml_profile=profile)
+
+                root_ntsc = ET.parse(xml_ntsc).getroot()
+                root_pal = ET.parse(xml_pal).getroot()
+                assert root_ntsc.find(".//rate/timebase").text == "30"
+                assert root_ntsc.find(".//rate/ntsc").text == "TRUE"
+                assert root_pal.find(".//rate/timebase").text == "25"
+                assert root_pal.find(".//rate/ntsc").text == "FALSE"
+
     def test_camera_timecode_offsets_frames_properly(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)
@@ -252,6 +273,26 @@ class TestGenerateFcpxml(unittest.TestCase):
             self.assertAlmostEqual(seconds, 2.0, delta=frame_duration)
 
 
+    def test_supports_multiple_frame_rates_and_cumulative_spine_offset(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "take1.mp4"
+            video_path.write_bytes(b"")
+            fcpxml_60 = tmp_path / "out_60.fcpxml"
+            edl = _sample_edl()
+
+            generate_fcpxml(edl, video_path, total_source_dur=30.0, total_out_dur=12.5,
+                             output_fcpxml_path=fcpxml_60, fps=60.0, width=3840, height=2160)
+
+            root = ET.parse(fcpxml_60).getroot()
+            fmt = root.find(".//format")
+            assert fmt.get("frameDuration") == "100/6000s"
+            assert fmt.get("width") == "3840"
+            assert fmt.get("height") == "2160"
+            clips = root.findall(".//asset-clip")
+            assert clips[0].get("offset") == "0s"
+            assert clips[1].get("offset") == "30000/6000s"
+
 class TestGenerateEdlCsv(unittest.TestCase):
     def test_csv_contains_header_and_rows(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -312,8 +353,8 @@ class TestRenderCutVideo(unittest.TestCase):
         cmd_str = " ".join(cmd)
         self.assertIn("-hwaccel videotoolbox -ss 10.000 -to 15.000 -i raw_footage.mp4", cmd_str)
         self.assertIn("-hwaccel videotoolbox -ss 20.000 -to 27.500 -i raw_footage.mp4", cmd_str)
-        self.assertIn("curve=iqsin", cmd_str)
-        self.assertIn("curve=qsin", cmd_str)
+        self.assertIn("afade=t=in:st=0:d=0.020:curve=iqsin", cmd_str)
+        self.assertIn("d=0.020:curve=qsin", cmd_str)
         self.assertNotIn("curve=oqsin", cmd_str)
         self.assertIn("-c:v h264_videotoolbox -b:v 12M -g 30", cmd_str)
         self.assertIn("-movflags +faststart", cmd_str)

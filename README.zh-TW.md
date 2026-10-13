@@ -11,7 +11,7 @@
 
 ## 專案總覽 (Overview)
 
-**Video Trimmer** 是專為單機位口播、教學影片與演講錄影設計的 AI 自動粗剪與去蕪存菁引擎。系統結合 **Google Vertex AI Gemini 3.8 Flash** 原生多模態影片理解、**Whisper 毫秒級逐字聲學時間戳**（Apple Silicon Metal `mlx-whisper` 加速）、**五層統一剪輯架構（5-Layer Unified Architecture）** 以及 **聲學起音鎖定（Acoustic Onset Snapping）**。每次執行會自動剔除 NG 重錄、吃螺絲與無效停頓，同時保護連貫長句不被切碎，並匯出多格式專業剪輯時間軸（`.xml`, `.fcpxml`, `.edl`, `.csv`）、8 維度品質審計報告（`.md`, `.json`）與完成粗剪的 MP4 影片。
+**Video Trimmer** 是專為單機位口播、教學影片與演講錄影設計的 AI 自動粗剪與去蕪存菁引擎。系統結合 **Google Vertex AI Gemini 3.8 Flash** 原生多模態影片理解、**Whisper 毫秒級逐字聲學時間戳**（Apple Silicon Metal `mlx-whisper` 加速）、**五層統一剪輯架構（5-Layer Unified Architecture）** 以及 **聲學起音鎖定（Acoustic Onset Snapping）**。每次執行會自動剔除 NG 重錄、吃螺絲與無效停頓，同時保護連貫長句不被切碎，並匯出多格式專業剪輯時間軸（`.xml`, `.fcpxml`, `.csv`）、8 維度品質審計報告（`.md`, `.json`）與完成粗剪的 MP4 影片。
 
 ---
 
@@ -47,7 +47,7 @@ flowchart TD
 
     subgraph L3_L4["Layer 3 & 4: 逐字邊界精修、跨片段合一與聲學起音鎖定"]
         L3["Layer 3: 子句展開與逐字稿邊界精修<br/>(resolve_clip_sub_units + _trim_matched_words_by_transcript)"]:::stage3Style
-        L4["Layer 4: 跨片段連貫小句無縫合一<br/>(coalesce_adjacent_sub_units, 字間距 <0.40s 消除跳接)"]:::stage3Style
+        L4["Layer 4: 跨片段連貫小句無縫合一<br/>(coalesce_adjacent_sub_units, 字間距 <0.65s 消除跳接)"]:::stage3Style
         AC["聲學起音鎖定與字尾塞音保護<br/>(發聲前 80ms 鎖定 + CPS 動態尾韻保底 >=t_last)"]:::stage3Style
         L3 --> L4 --> AC
     end
@@ -59,8 +59,8 @@ flowchart TD
     end
 
     subgraph Deliverables["最終交付成果 (<input_dir>/output/)"]
-        OUT_MP4["交付成果: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox 硬體加速 + 15ms 等功率微淡化)"]:::outputStyle
-        OUT_NLE["交付成果: 多平台 NLE 剪輯時間軸<br/>(.xml / .fcpxml / .edl / .csv)"]:::outputStyle
+        OUT_MP4["交付成果: <basename>_<tag>_trimmed.mp4<br/>(VideoToolbox 硬體加速 + 20ms 等功率微淡化)"]:::outputStyle
+        OUT_NLE["交付成果: 多平台 NLE 剪輯時間軸<br/>(.xml / .fcpxml / .csv)"]:::outputStyle
         OUT_REP["交付成果: 8 維度品質審計報告<br/>(_edl_report.md & _edl_report.json)"]:::outputStyle
     end
 
@@ -88,15 +88,16 @@ flowchart TD
    - 將多句跨度自動展開為獨立的 `Sentence ID` 子單元，自動略過時間區間內未被選中的 NG 句。
    - 當 LLM 在 `transcript` 欄位修剪了句首吃螺絲或句尾殘句時，透過 `_trim_matched_words_by_transcript`（最右側子序列錨定與短詞對齊）自動將 `t_first` 與 `t_last` 對齊至實際保留字詞的 Whisper 邊界。
 4. **第四層：跨片段連貫小句無縫合一 (`coalesce_adjacent_sub_units`)**：
-   - 當相鄰片段為連續 `Sentence ID`（中間未跳過任何 NG 句、且邊界未經過口誤修剪）且物理字間距 `< 0.40s` 時，自動合併為單一連續片段，消除長句內部的無謂跳接（Jump-Cut）與多餘微淡化。
+   - 當相鄰片段為連續 `Sentence ID`（中間未跳過任何 NG 句、且邊界未經過口誤修剪）且物理字間距 `< 0.65s`（預設值；Show Mode 可用 `--keep-pause-sec` 覆寫）時，自動合併為單一連續片段，消除長句內部的無謂跳接（Jump-Cut）與多餘微淡化。
 5. **第五層：物理時間軸確定性自癒與 8 維度雙軌品質審計 (`edl_auditor.py`)**：
    - 強制依時間軸單調遞增排序（`source_in < source_out` 且 `c[i].source_out <= c[i+1].source_in`）、自動剔除被包裹的冗餘子片段、消解相鄰邊界微重疊、強制保底 `source_out >= t_last`（保護字尾塞音）、自動縫合 `< 0.45s` 閃幀微碎切，並結合 Whisper 與 Gemini 雙軌文字比對輸出 `<base>_<tag>_edl_report.md` 與含頂層 `agent_verdict` 品質閘門的 `<base>_<tag>_edl_report.json`。
 6. **聲學起音鎖定與字尾塞音保護 (`acoustic.py`)**：
    - 將剪輯入點鎖定於聲帶發聲前 80 ms，並依據講者語速（CPS）動態計算緩衝邊界，強制 `true_speech_end >= t_last` 以保護字尾無聲除阻音與鼻音。
-7. **15 ms 等功率音訊微淡化與關鍵幀硬體加速渲染 (`render.py`)**：
-   - 每個保留片段採用前置 `-ss` / `-to` 關鍵幀快速定位（Fast Input Seeking，免除廢片區段解碼），結合 Apple Silicon `VideoToolbox` 硬體編解碼（`-hwaccel videotoolbox` + `h264_videotoolbox`，具備 `libx264` 自動降級備援）、1 秒關鍵幀間距（`-g 30`）與 15 ms 等功率淡入淡出（`afade=t=in:d=0.015:curve=iqsin` 與 `afade=t=out:d=0.015:curve=qsin`），消除跳接爆音並大幅提升成片渲染與快轉速度。
+7. **20 ms 等功率音訊微淡化與關鍵幀硬體加速渲染 (`render.py`)**：
+   - 每個保留片段採用前置 `-ss` / `-to` 關鍵幀快速定位（Fast Input Seeking，免除廢片區段解碼），結合 Apple Silicon `VideoToolbox` 硬體編解碼（`-hwaccel videotoolbox` + `h264_videotoolbox`，具備 `libx264` 自動降級備援）、1 秒關鍵幀間距（`-g 30`）與 20 ms 等功率淡入淡出（`afade=t=in:d=0.020:curve=iqsin` 與 `afade=t=out:d=0.020:curve=qsin`），消除跳接爆音並大幅提升成片渲染與快轉速度。
 8. **多平台 NLE 時間軸匯出 (`exporters.py`)**：
-   - 支援匯出 **Final Cut Pro 7 XML**（`.xml`，適用於 Adobe Premiere Pro 與 DaVinci Resolve）、**Apple Final Cut Pro FCPXML**（`.fcpxml`）、**CMX 3600 EDL**（`.edl`）與 **CSV** 剪輯表。
+   - 支援匯出 **Final Cut Pro 7 XML**（`.xml`，適用於 Adobe Premiere Pro 與 DaVinci Resolve）、**Apple Final Cut Pro FCPXML**（`.fcpxml`）與 **CSV** 剪輯表。
+   - `--xml-profile premiere`（預設）輸出 Premiere Pro 結構；`--xml-profile davinci` 以同一結構輸出 `xmeml v5`、不互撞的 `{video}_master` / `{video}_v{idx}` / `{video}_a{idx}` ID，並把相機時間碼寫進 `<file><timecode>` 且不寫 `<frame>`（避免 DaVinci Resolve 脫機、定格與畫面消失）。
 
 ---
 
@@ -118,13 +119,13 @@ video-trimmer/
 │       │   ├── edl_auditor.py               # 局部小視窗精準重掃、時間軸自癒與 8 維度品質審計
 │       │   ├── gemini_client.py             # Vertex AI (ADC) 客戶端與雙模式提示詞建構
 │       │   ├── gcs_utils.py                 # GCS 暫存、Google Drive 快取與中文檔名修復
-│       │   ├── exporters.py                 # FCP7 XML、FCPXML、EDL 與 CSV 時間軸匯出
-│       │   └── render.py                    # ffprobe 檢測與 FFmpeg 15ms 微淡化渲染
+│       │   ├── exporters.py                 # FCP7 XML、FCPXML 與 CSV 時間軸匯出
+│       │   └── render.py                    # ffprobe 檢測與 FFmpeg 20ms 微淡化渲染
 │       └── prompts/                         # 提示詞規範實體目錄 (SSOT)
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
-└── tests/                                   # 離線單元測試套件（101 項測試）
+└── tests/                                   # 離線單元測試套件（103 項測試）
 ```
 
 ---
@@ -173,7 +174,7 @@ chmod +x setup.sh
 1. **極簡指令（`/` 指定技能 + `@` 標記檔案，推薦）**：輸入 `/video-trimmer` 選取技能，並用 `@` 標記影片與講稿檔案，僅需列出關鍵欄位（如 `影片: @XX, 講稿: @YY`），無須撰寫完整句子。
 2. **口語表達（自然語言自動觸發）**：直接用日常口語描述剪輯需求，Antigravity 會自動識別意圖並呼叫此 Plugin。
 
-所有產出檔案（`_trimmed.mp4`、`.xml`、`.fcpxml`、`.edl`、`.csv`、`_edl_report.md` 與 `_edl_report.json`）預設皆會自動隔離儲存於原始影片目錄下的 `output/` 子目錄（Google Drive 連結則為 `./output/`）。
+所有產出檔案（`_trimmed.mp4`、`.xml`、`.fcpxml`、`.json`、`.csv`、`_edl_report.md` 與 `_edl_report.json`）預設皆會自動隔離儲存於原始影片目錄下的 `output/` 子目錄（Google Drive 連結則為 `./output/`）。
 
 ### 情境 1：有講稿 / 大綱的錄影粗剪（Mode A：講稿錨定對齊）
 適用於已備妥拍攝腳本或口播大綱的錄影，系統會自動過濾腳本內的非口播標題，依序對齊每個段落並保留最後一次完整成功的 Take。
@@ -252,10 +253,10 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --analysis-vi
 
 每次執行完成後，Agent 會在 `output/` 目錄下產出並驗證以下檔案：
 
-1. **`<basename>_<tag>_trimmed.mp4`**：套用 15 ms 等功率音訊微淡化、可直接播放的粗剪成品影片。
-2. **`<basename>_<tag>_edl.xml`**：適用於 **Adobe Premiere Pro** 與 **DaVinci Resolve** 的 Final Cut Pro 7 XML 時間軸。
+1. **`<basename>_<tag>_trimmed.mp4`**：套用 20 ms 等功率音訊微淡化、可直接播放的粗剪成品影片。
+2. **`<basename>_<tag>_edl.xml`**：Final Cut Pro 7 XML 時間軸，**Adobe Premiere Pro** 用 `--xml-profile premiere`（預設），**DaVinci Resolve** 用 `--xml-profile davinci`。
 3. **`<basename>_<tag>_edl.fcpxml`**：適用於 **Apple Final Cut Pro** 的 FCPXML 時間軸。
-4. **`<basename>_<tag>_edl.edl`** / **`<basename>_<tag>_edl.csv`**：CMX 3600 EDL 與試算表剪輯清單。
+4. **`<basename>_<tag>_edl.json`** / **`<basename>_<tag>_edl.csv`**：結構化剪輯決策資料與試算表剪輯清單。
 5. **`<basename>_<tag>_edl_report.md`** / **`.json`**：8 維度粗剪品質審計報告與 `agent_verdict` 自動化品質閘門結果。
 
 ---

@@ -105,10 +105,6 @@ def extract_script_blocks(script_text: str | None) -> list[dict]:
     return blocks
 
 
-# Backward-compatible alias for internal callers and tests
-_extract_script_blocks = extract_script_blocks
-
-
 def _script_block_coverage_score(block_norm: str, target_norm: str) -> float:
     """
     Compute the fraction of `block_norm` characters covered in order within `target_norm`.
@@ -165,11 +161,6 @@ def _script_block_coverage_score(block_norm: str, target_norm: str) -> float:
         best_score = max(best_score, _window_coverage(target_norm[anchor_start:anchor_end]))
 
     return best_score
-
-
-def _match_text_similarity(norm_a: str, norm_b: str) -> float:
-    """Return script coverage score of norm_a inside norm_b."""
-    return _script_block_coverage_score(norm_a, norm_b)
 
 
 def _unit_overlaps_script_block(block_norm: str, unit_norm: str) -> bool:
@@ -808,7 +799,7 @@ def repair_edl_micro_windows(
         start_offset = f"{int(math.floor(win_start))}s"
         end_offset = f"{int(math.ceil(win_end))}s"
         logger.info(
-            "    [局部視窗精準重掃] %s | 區間: %s ~ %s (%d 句候選台詞)",
+            "    [Micro-Window Re-Scan] %s | Window: %s ~ %s (%d candidate sentences)",
             anomaly["type"],
             start_offset,
             end_offset,
@@ -825,7 +816,7 @@ def repair_edl_micro_windows(
                 anomaly=anomaly,
             )
         except Exception as exc:
-            logger.warning("    [局部視窗重掃跳過] 區間 %s~%s 推論失敗，保留原結果: %s", start_offset, end_offset, exc)
+            logger.warning("    [Micro-Window Skipped] Window %s~%s failed; keeping original clips: %s", start_offset, end_offset, exc)
             continue
 
         new_clips = repaired_edl.get("final_edl", []) if isinstance(repaired_edl, dict) else []
@@ -1144,14 +1135,14 @@ def audit_edl_quality(
         fatal_violations.append(f"Detected off-screen speaker audio in Clip(s) {off_screen_clip_ids}.")
 
     # Dimension 4: Script Clause Coverage & Single-Winner Collision Check (Mode A)
-    script_blocks = _extract_script_blocks(script_text)
+    script_blocks = extract_script_blocks(script_text)
     script_take_collisions = []
     if script_blocks:
         combined_norm = " ".join(normalize_text(c.get("transcript", "")) for c in refined_edl)
         matched_blocks = []
         missing_blocks = []
         for blk in script_blocks:
-            if _match_text_similarity(blk["norm_text"], combined_norm) >= 0.50:
+            if _script_block_coverage_score(blk["norm_text"], combined_norm) >= 0.50:
                 matched_blocks.append(blk["label"])
             else:
                 missing_blocks.append(blk["label"])

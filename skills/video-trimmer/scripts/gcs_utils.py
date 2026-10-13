@@ -56,7 +56,7 @@ def parse_gcs_uri(gcs_uri: str) -> tuple[str, str]:
     """
     parsed = urlparse(gcs_uri)
     if parsed.scheme != "gs":
-        raise ValueError(f"無效的 GCS URI（必須以 gs:// 開頭）: {gcs_uri}")
+        raise ValueError(f"Invalid GCS URI (must start with gs://): {gcs_uri}")
     bucket_name = parsed.netloc
     blob_name = parsed.path.lstrip("/")
     return bucket_name, blob_name
@@ -125,7 +125,7 @@ def parse_gdrive_url(url_or_id: str) -> dict:
     if re.match(r"^[a-zA-Z0-9_-]{15,}$", s) and not Path(s).exists():
         return {"id": s, "type": "unknown"}
 
-    raise ValueError(f"無法解析 Google Drive 連結或 ID: {url_or_id}")
+    raise ValueError(f"Invalid Google Drive URL or ID: {url_or_id}")
 
 
 def _load_gcloud_user_drive_credentials():
@@ -367,11 +367,11 @@ def download_gdrive_file_with_cache(
     if not force_download and local_path.is_file():
         if remote_md5 and local_path.stat().st_size == remote_size:
             if compute_file_md5(local_path) == remote_md5:
-                logger.info("[GDrive Cache Hit] 本地檔案 MD5 與雲端硬碟一致 (%s)，略過下載。", local_path.name)
+                logger.info("[GDrive Cache Hit] Local MD5 matches Google Drive (%s). Skipping download.", local_path.name)
                 return local_path
 
     size_mb = remote_size / (1024 * 1024)
-    logger.info("[GDrive Download] 正在透過 ADC 從 Google Drive 下載 '%s' (%.1f MB)...", filename, size_mb)
+    logger.info("[GDrive Download] Downloading '%s' (%.1f MB) from Google Drive via ADC...", filename, size_mb)
     dl_url = f"https://www.googleapis.com/drive/v3/files/{file_id}?alt=media&supportsAllDrives=true"
     tmp_path = local_path.with_suffix(local_path.suffix + ".part")
     with sess.get(dl_url, stream=True, timeout=600) as r:
@@ -381,7 +381,7 @@ def download_gdrive_file_with_cache(
                 if chunk:
                     f.write(chunk)
     tmp_path.replace(local_path)
-    logger.info("[✓] Google Drive 下載完成: %s", local_path)
+    logger.info("[Done] Google Drive download complete: %s", local_path)
     return local_path
 
 
@@ -400,7 +400,7 @@ def upload_file_to_gcs(
     """
     local_p = Path(local_path).resolve()
     if not local_p.is_file():
-        raise FileNotFoundError(f"找不到本地檔案: {local_p}")
+        raise FileNotFoundError(f"Local file not found: {local_p}")
 
     gcs_client = client or get_gcs_client()
     bucket = gcs_client.bucket(bucket_name)
@@ -428,7 +428,7 @@ def upload_file_to_gcs(
                     )
                 ):
                     gcs_uri = f"gs://{bucket_name}/{destination_blob_name}"
-                    logger.info("[GCS Cache Hit] 遠端物件雜湊相符 (%s)，秒級略過重傳！", gcs_uri)
+                    logger.info("[GCS Cache Hit] Remote blob hash matches (%s). Skipping upload.", gcs_uri)
                     return gcs_uri
         except Exception:
             pass
@@ -446,10 +446,10 @@ def upload_file_to_gcs(
             meta.update(extra_metadata)
         blob.metadata = meta
 
-    logger.info("[*] 上傳 %s 至 gs://%s/%s...", local_p.name, bucket_name, destination_blob_name)
+    logger.info("[*] Uploading %s to gs://%s/%s...", local_p.name, bucket_name, destination_blob_name)
     blob.upload_from_filename(str(local_p))
     gcs_uri = f"gs://{bucket_name}/{destination_blob_name}"
-    logger.info("[✓] 上傳完成: %s", gcs_uri)
+    logger.info("[Done] Upload complete: %s", gcs_uri)
     return gcs_uri
 
 
@@ -464,6 +464,6 @@ def delete_gcs_blob(gcs_uri: str, client: storage.Client = None) -> None:
         bucket = gcs_client.bucket(bucket_name)
         blob = bucket.blob(blob_name)
         blob.delete()
-        logger.info("[✓] 清理暫存 GCS 物件: %s", gcs_uri)
+        logger.info("[Done] Deleted temporary GCS blob: %s", gcs_uri)
     except Exception as e:
-        logger.debug("清理 GCS 物件時略過例外 (%s): %s", gcs_uri, e)
+        logger.debug("Ignored error while deleting GCS blob (%s): %s", gcs_uri, e)

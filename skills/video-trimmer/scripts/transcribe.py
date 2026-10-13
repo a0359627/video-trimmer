@@ -1,4 +1,10 @@
-"""Whisper 轉錄、語意句子合併、時間戳工具與文字對齊。"""
+"""Whisper word-level transcription, acoustic clause segmentation, word-boundary trimming, and cross-clip coalescing.
+
+ASD-STE100:
+1. Segment Whisper words into Sentence IDs purely on physical breath pauses, stretched onsets, and punctuation closure.
+2. Format candidate Sentence IDs for the Gemini multimodal prompt in English.
+3. Align and trim word boundaries to the LLM-selected transcript and coalesce contiguous sentences across clips.
+"""
 
 import difflib
 import json
@@ -27,11 +33,12 @@ HAS_WHISPER = HAS_MLX_WHISPER or HAS_FASTER_WHISPER
 
 
 def normalize_text(text):
+    """Strip punctuation and whitespace, and convert text to lowercase for alignment."""
     return re.sub(r'[^\w一-鿿]', '', text).lower()
 
 
 def _compute_sentence_speaker(sentence):
-    """計算句子內多數說話者與合法主講人狀態"""
+    """Compute the majority speaker ID and target-speaker flag from word-level attributes."""
     words = sentence.get('words', [])
     if words:
         target_cnt = sum(1 for w in words if w.get('is_target_speaker', True))
@@ -127,8 +134,11 @@ def is_fuzzy_prefix_restart(
 
 def is_earlier_sentence_ng_retake(prev_text: str, next_text: str) -> bool:
     """
-    判定前一個語意單元 (prev_text) 是否為後一個語意單元 (next_text) 的 NG 重講前綴或半截廢話。
-    同時容忍句尾最後 1~2 個字因吃螺絲產生的同音錯字（例如「細微摔」vs「細微衰減」）。
+    Return True if prev_text is an aborted false-start prefix of next_text.
+
+    ASD-STE100:
+    Used by chunk-boundary backtracking and post-LLM retake anomaly detection.
+    Never used to filter or delete sentences during Layer 1 segmentation.
     """
     if is_fuzzy_prefix_restart(prev_text, next_text):
         return True
@@ -141,15 +151,15 @@ def is_earlier_sentence_ng_retake(prev_text: str, next_text: str) -> bool:
     if len(p_norm) < 3 or len(n_norm) < 3:
         return False
 
-    # 1. 開頭前綴完全相同（>= 3 字），且後句長度不短於前句的 75%（代表重新完整重講）
+    # 1. Exact 3-char opening match where next_text is at least 75% as long as prev_text
     if p_norm[:3] == n_norm[:3] and len(n_norm) >= int(len(p_norm) * 0.75):
         return True
 
-    # 2. 前句扣除最後 1 個可能吃螺絲的錯字後（長度 >= 4），完整出現在後句中
+    # 2. prev_text minus a trailing 1-char stumble typo appears inside next_text
     if len(p_norm) >= 4 and p_norm[:-1] in n_norm:
         return True
 
-    # 3. 前句與後句開頭區段具有高序列相似度（>= 0.72）
+    # 3. High sequence similarity (>= 0.72) between prev_text and the opening of next_text
     if len(p_norm) >= 5:
         head_window = n_norm[: len(p_norm) + 4]
         if difflib.SequenceMatcher(None, p_norm, head_window).ratio() >= 0.72:
@@ -172,9 +182,9 @@ def _split_sentence_on_paused_restarts(
 
     ASD-STE100:
     Evaluate word-level acoustic gaps and durations.
-    When a physical pause (gap >= min_pause_sec) or stretched onset separates two clauses,
-    or when the speaker immediately restarts the opening clause prefix (Prefix Anchor Restart),
-    split into independent sentence units so the LLM can arbitrate each take individually.
+    When a physical pause (gap >= min_pause_sec) or stretched onset (>= 1.20s and >= 0.45s/char)
+    separates two clauses, or when the speaker immediately restarts the opening clause prefix
+    (Prefix Anchor Restart), split into independent sentence units so the LLM can arbitrate each take.
     Keep conjunction prefixes attached when the gap is below 0.85s unless an exact restart occurs.
     """
     words = sentence_data.get("words", [])
@@ -381,7 +391,7 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
         if gap >= 1.0:
             should_split = True
 
-        # Rule 8: Conjunction attachment protection (commit 0b579f4 invariant)
+        # Rule 8: Conjunction attachment protection across pauses < 0.85s (never overrides a detected restart)
         if should_split and not is_restart and not is_s_retake_head and gap < 0.85 and dur < max_sentence_dur * 1.4:
             if curr.get("is_target_speaker", True) == s_is_target and curr.get("speaker_id") == s_spk:
                 if any(s_text.startswith(c) for c in CONJUNCTIONS):
@@ -442,11 +452,14 @@ def transcribe_video_whisper(
     offscreen_channel=None,
 ):
     """
-    第一階段：微觀聲學時間戳對齊 (Word-level Ground Truth)
-    在調用大模型之前，先在本地以 Whisper 生成帶有毫秒級字級時間戳的結構化劇本。
-    offscreen_channel: Show Mode 用。"left" / "right" / "auto" 時，依雙聲道麥克風能量把每個字
-    標成 HOST / OFFSCREEN / CUE，並在角色切換處拆句；None 或 "none" 維持原行為。
-    返回: (raw_segments, merged_sentences)
+    Extract word-level acoustic ground-truth timestamps via Whisper and group them into Sentence IDs.
+
+    offscreen_channel (Show Mode): "left" / "right" / "auto" tags every word as HOST / OFFSCREEN / CUE
+    from the two-microphone channel energy and splits sentences at role changes.
+    None or "none" keeps the original behaviour.
+
+    Returns:
+        Tuple of (raw_segments, merged_sentences).
     """
     video_path = Path(video_path)
     out_json = Path(out_json_path)
@@ -454,7 +467,7 @@ def transcribe_video_whisper(
 
     raw_results = []
     if out_json.exists():
-        logger.info("載入既有之 Whisper 聲學時間戳: %s", out_json.name)
+        logger.info("Loading cached Whisper word timestamps: %s", out_json.name)
         with open(out_json, "r", encoding="utf-8") as f:
             raw_results = json.load(f)
     elif HAS_WHISPER:
@@ -465,7 +478,7 @@ def transcribe_video_whisper(
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
         if HAS_MLX_WHISPER:
-            logger.info("本地調用 mlx-whisper (%s) [Apple Silicon Metal GPU 原生加速] 進行微觀字級時間戳轉錄...", model_name)
+            logger.info("Running mlx-whisper (%s) [Apple Silicon Metal GPU] for word-level transcription...", model_name)
             mlx_repo = f"mlx-community/whisper-{model_name}-mlx"
             res = mlx_whisper.transcribe(str(temp_wav), path_or_hf_repo=mlx_repo, word_timestamps=True, language="zh")
             for i, s in enumerate(res.get("segments", [])):
@@ -484,8 +497,8 @@ def transcribe_video_whisper(
                     "words": words_data
                 })
         else:
-            # faster-whisper (Windows / Linux)：預設改用 large-v3 以維持中文辨識品質，
-            # 可用環境變數 WHISPER_MODEL 覆寫；有 NVIDIA GPU 時走 CUDA float16，失敗自動退回 CPU int8。
+            # faster-whisper (Windows / Linux): default to large-v3 for Chinese accuracy (override with WHISPER_MODEL).
+            # Use CUDA float16 when an NVIDIA GPU is present; fall back to CPU int8 on any failure.
             fw_model = os.environ.get("WHISPER_MODEL") or "large-v3"
             fw_device = os.environ.get("WHISPER_DEVICE") or "auto"
             segments = None
@@ -493,16 +506,16 @@ def transcribe_video_whisper(
             last_err = None
             for dev, ctype in attempts:
                 try:
-                    logger.info("本地調用 faster-whisper (%s, %s/%s) 進行微觀字級時間戳轉錄...", fw_model, dev, ctype)
+                    logger.info("Running faster-whisper (%s, %s/%s) for word-level transcription...", fw_model, dev, ctype)
                     model = WhisperModel(fw_model, device=dev, compute_type=ctype)
                     seg_iter, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
-                    segments = list(seg_iter)  # 在此強制執行，CUDA DLL 缺失等錯誤會在這裡拋出
+                    segments = list(seg_iter)  # Force evaluation here so missing CUDA DLLs raise inside the try
                     break
                 except Exception as e:  # noqa: BLE001
                     last_err = e
-                    logger.warning("faster-whisper 以 %s 執行失敗：%s", dev, e)
+                    logger.warning("faster-whisper failed on %s: %s", dev, e)
             if segments is None:
-                raise RuntimeError(f"faster-whisper 轉錄失敗：{last_err}")
+                raise RuntimeError(f"faster-whisper transcription failed: {last_err}")
 
             for i, s in enumerate(segments):
                 words_data = []
@@ -525,37 +538,45 @@ def transcribe_video_whisper(
 
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(raw_results, f, ensure_ascii=False, indent=2)
-        logger.info("Whisper 轉錄完畢，共解析出 %d 個高精度時間戳片段。", len(raw_results))
+        logger.info("Whisper transcription complete (%d raw segments).", len(raw_results))
     else:
-        logger.info("[提示] 未安裝 mlx-whisper 或 faster-whisper，跳過本地字級轉錄。")
+        logger.info("[Notice] Neither mlx-whisper nor faster-whisper is installed. Skipping local Whisper transcription.")
         return [], []
 
-    # Show Mode：先依麥克風聲道把每個字歸屬給主持人 / 場外 / 倒數口令，並在角色切換處拆開片段。
-    # 原始 Whisper 快取 (out_json) 維持不變，角色每次重新計算。
+    # Show Mode: attribute every word to HOST / OFFSCREEN / CUE from the microphone channels and split
+    # segments at role changes. The raw Whisper cache (out_json) stays unchanged; roles are recomputed each run.
     segments_for_merge = raw_results
     if offscreen_channel and str(offscreen_channel).lower() != "none":
         from .roles import apply_mic_roles
 
-        logger.info("Show Mode：依雙聲道麥克風能量歸屬說話者角色（場外聲道設定=%s）...", offscreen_channel)
+        logger.info("Show Mode: attributing speaker roles from two-microphone channel energy (offscreen channel=%s)...",
+                    offscreen_channel)
         segments_for_merge, _role_info = apply_mic_roles(
             raw_results, video_path, out_json.parent, offscreen_channel=str(offscreen_channel).lower()
         )
 
-    # 執行語意句子合併（每次由 raw_results 即時計算，確保最新斷句與重講拆分規則生效）
+    # Recompute clause-level sentences from raw_results so latest segmentation rules apply
     sentences = merge_whisper_segments_to_sentences(segments_for_merge)
     with open(sentences_json, "w", encoding="utf-8") as f:
         json.dump(sentences, f, ensure_ascii=False, indent=2)
-    logger.info("語意合併完成：從 %d 個聲學碎片濃縮為 %d 個完整語意句子！", len(segments_for_merge), len(sentences))
+    logger.info("Clause segmentation complete: %d raw segments grouped into %d sentences.",
+                len(segments_for_merge), len(sentences))
 
     return raw_results, sentences
 
 
 def format_whisper_transcript_for_prompt(whisper_sentences):
-    """將 Whisper 合併後的語意句子格式化為 Gemini 提示詞專用的文字剪輯清單"""
+    """
+    Format merged Whisper sentences into the ground-truth text-based editing list for the Gemini prompt.
+
+    ASD-STE100:
+    Provide concise English instructions and numbered Sentence ID entries.
+    Show Mode (role-tagged sentences) keeps its own [HOST] / [OFFSCREEN] / [CUE] instruction block.
+    """
     from .roles import has_role_tags, role_of_sentence
 
     if has_role_tags(whisper_sentences):
-        # Show Mode：每句帶 [HOST] / [OFFSCREEN] / [CUE] 標籤，取捨規則交由主提示詞決定
+        # Show Mode: each sentence carries a [HOST] / [OFFSCREEN] / [CUE] tag; the master prompt decides what to keep
         lines = [
             "\n---",
             "## Whisper 語意句子時間戳劇本（Show Mode，含麥克風角色標籤）",
@@ -572,18 +593,16 @@ def format_whisper_transcript_for_prompt(whisper_sentences):
 
     lines = [
         "\n---",
-        "## Whisper 語意句子時間戳劇本 (Ground-Truth Semantic Sentences)",
-        "以下是由本地微觀語音模型（Whisper）對本片轉錄、並依據自然換氣停頓與重講邊界拆分之「句子清單」。",
-        "每個 Sentence 均為一個候選表達單元，包含物理起訖秒數（start -> end）。",
-        "【多模態發言人日誌審查與 Last Take Wins 鐵則】：",
-        "請務必結合視訊畫面中主講人的嘴型、眼神方向與肢體動作：",
-        "1. 僅挑選由畫面中央「目標主講人面對鏡頭正式發表」（target_host）的有效句子；",
-        "2. 任何由場外小幫手/導播喊出的口令（如 Action、報幕代號 CDA82/CTA-S2、CDA84 等，主講人嘴巴閉著或在等待）屬於無效場外音，嚴禁選入 final_edl！",
-        "3. 錄影空檔中主講人偏離鏡頭與工作人員之閒聊、自我檢討（如「這段不理想」），屬於 blooper/chatter，亦嚴禁選入 final_edl！",
-        "4. 若相鄰或相近的多個 Sentence 講述相同或重複開頭的台詞（講者吃螺絲重錄），請務必在 `sentence_ids` 中徹底剔除前面的 NG 句，只保留最後一次完整流暢的 Sentence ID！",
-        "5. 孤立短截殘句與棄用假開頭（Abandoned False Starts，話講到一半卡住放棄、只有連詞或片語、隨後重講者，如「雖然研究強烈支持」、「所以說人類」、「健康相關他也曾和口腔菌相」），100% 為無效廢料，絕對嚴禁選入 final_edl！",
-        "請在輸出 final_edl 時，於 `sentence_ids` 明確列出保留的 Sentence ID 陣列（並填寫 `start_sentence_id` 與 `end_sentence_id`），",
-        "並將 `source_in` 與 `source_out` 對齊起訖句子之時間：\n"
+        "## Whisper Ground-Truth Semantic Sentences",
+        "The list below contains candidate `Sentence ID` units segmented from local Whisper word-level timestamps at physical breath pauses and punctuation boundaries.",
+        "Each `Sentence ID` includes its physical start and end timestamps (`start -> end`).",
+        "Apply these multimodal diarization and Last Take Wins rules:",
+        "1. Select only valid sentences spoken on-camera by the primary target presenter with synchronized lip movement and direct camera gaze.",
+        "2. Exclude all off-screen crew cues (such as 'Action', 'Cut', or slate codes like 'HOOK', 'Scene 1', 'Take 2' spoken while the presenter's mouth is closed or waiting).",
+        "3. Exclude between-take chatter, throat clearing, and self-correction remarks directed to off-screen staff.",
+        "4. When adjacent or nearby `Sentence ID`s repeat the same opening clause or attempt the same script block, exclude all earlier aborted attempts from `sentence_ids` and keep ONLY the final complete take.",
+        "5. Never select isolated short fragments or abandoned false starts (the speaker stops mid-clause after only a conjunction or a phrase, then restarts; for example, only \"Although the research strongly supports...\" or \"So humans...\"). They are always invalid material.",
+        "6. In `final_edl`, list the exact retained `Sentence ID` integers in `sentence_ids` (and set `start_sentence_id` and `end_sentence_id`), and align `source_in` and `source_out` to the sentence timestamps:\n",
     ]
     for s in whisper_sentences:
         lines.append(f"[Sentence ID: {s['id']:3d}] {s['start']:6.2f}s -> {s['end']:6.2f}s | {s['text']}")
@@ -598,7 +617,7 @@ def _find_index(units, item):
 
 
 def _neighbor_bounds(whisper_units, first_item, last_item):
-    """回傳 (prev_sentence_end, next_sentence_start)：相鄰句子的邊界，供聲學搜尋範圍上限使用。"""
+    """Return (prev_sentence_end, next_sentence_start) for adjacent Whisper sentences."""
     idx_first = _find_index(whisper_units, first_item)
     idx_last = _find_index(whisper_units, last_item)
     prev_end = None
@@ -612,14 +631,12 @@ def _neighbor_bounds(whisper_units, first_item, last_item):
 
 def align_clip_with_whisper(whisper_units, clip_data, total_dur):
     """
-    比照字幕方式：嚴格以 Whisper 物理時間為準，不猜測、不更動字尾！
-    優先採用 start_sentence_id / end_sentence_id 或 start_segment_id / end_segment_id，
-    次之採用文本子字串比對，再次之採用時間窗。
-    In 點鎖定：嚴格跳過所有 is_target_speaker == False 的非目標人聲，直擊主講人真聲開口。
+    Align a clip with Whisper physical word timestamps.
 
-    回傳: (t_first, t_last, prev_sentence_end, next_sentence_start)
-    prev_sentence_end / next_sentence_start 為相鄰 Whisper 句子的邊界（無相鄰句子時為 None），
-    供 acoustic.refine_speech_bounds_locked 做結構性搜尋範圍上限。
+    ASD-STE100:
+    1. Match by start_sentence_id / end_sentence_id first, then by time-window overlap.
+    2. Skip leading words marked with is_target_speaker == False so t_first locks to the target presenter.
+    3. Return (t_first, t_last, prev_sentence_end, next_sentence_start).
     """
     if not whisper_units:
         return clip_data.get("source_in", 0), clip_data.get("source_out", total_dur), None, None
@@ -632,13 +649,12 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
     if end_id is None:
         end_id = clip_data.get("end_segment_id")
 
-    # 1. 優先使用 ID
+    # 1. Match by Sentence ID range first
     if start_id is not None and end_id is not None:
         matched = [s for s in whisper_units if start_id <= s["id"] <= end_id]
         if matched:
             prev_end, next_start = _neighbor_bounds(whisper_units, matched[0], matched[-1])
             transcript = clip_data.get("transcript", "") or clip_data.get("content", "")
-            # 若提供了明確台詞文字，且句子內有詳細字級時間戳，精確對齊至台詞起訖字
             if transcript:
                 matched_words = []
                 for s in matched:
@@ -660,7 +676,7 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
                     matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
                     blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
                     if blocks and sum(b.size for b in blocks) >= max(2, len(tgt_norm) * 0.4):
-                        # 聲紋鎖定：尋找匹配區間中第一個屬於合法主講人的字元
+                        # Lock to the first matched character spoken by the target presenter
                         t_first = None
                         for b in blocks:
                             for c_idx in range(b.b, b.b + b.size):
@@ -678,7 +694,6 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
 
             first_words = matched[0].get("words", [])
             last_words = matched[-1].get("words", [])
-            # 聲紋鎖定：若首句開頭有場外雜音單詞，跳至第一個合法主講人單詞
             target_words = [w for w in first_words if w.get("is_target_speaker", True)]
             if target_words:
                 t_first = target_words[0]["start"]
@@ -694,14 +709,14 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
     raw_out = clip_data.get("source_out", total_dur)
     transcript = clip_data.get("transcript", "")
 
-    # 2. 透過時間窗附近篩選
+    # 2. Filter candidate segments within the time window
     cand_segs = [s for s in whisper_units if not (s["end"] < raw_in - 2.5 or s["start"] > raw_out + 2.5)]
     if not cand_segs:
         return raw_in, raw_out, None, None
 
     prev_end, next_start = _neighbor_bounds(whisper_units, cand_segs[0], cand_segs[-1])
 
-    # 3. 逐字元建立時間線並做 SequenceMatcher
+    # 3. Build character-level timeline and align with SequenceMatcher
     char_timeline = []
     for s in cand_segs:
         words = s.get("words", [])
@@ -731,7 +746,6 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
         matcher = difflib.SequenceMatcher(None, tgt_norm, whisper_str)
         blocks = [b for b in matcher.get_matching_blocks() if b.size > 0]
         if blocks:
-            # 聲紋鎖定：尋找第一個屬於合法主講人的字元
             t_first = None
             for b in blocks:
                 for c_idx in range(b.b, b.b + b.size):
@@ -747,41 +761,7 @@ def align_clip_with_whisper(whisper_units, clip_data, total_dur):
             t_last = char_timeline[min(len(char_timeline) - 1, last_b.b + last_b.size - 1)][2]
             return t_first, t_last, prev_end, next_start
 
-    # 若匹配落空，返回重疊 segment 範圍
     return cand_segs[0]["start"], cand_segs[-1]["end"], prev_end, next_start
-
-
-def filter_ng_retake_sentences(sentences: list[dict], max_lookahead: int = 3, max_time_span: float = 25.0) -> list[dict]:
-    """
-    在候選句子序列中執行確定性的「Last Take Wins」過濾：
-    若句子 S_i 與後續緊鄰的句子 S_j (j > i) 構成重講關係（S_i 為 NG 前綴或吃螺絲半截話），
-    自動於自然句子邊界處剔除 S_i，僅保留最後一次完整句子。
-    """
-    if len(sentences) <= 1:
-        return list(sentences)
-
-    kept = []
-    n = len(sentences)
-    for i, s_curr in enumerate(sentences):
-        is_ng = False
-        limit = min(n, i + 1 + max_lookahead)
-        for j in range(i + 1, limit):
-            s_later = sentences[j]
-            if float(s_later.get("start", 0.0)) - float(s_curr.get("end", 0.0)) > max_time_span:
-                break
-            if is_earlier_sentence_ng_retake(s_curr.get("text", ""), s_later.get("text", "")):
-                logger.info(
-                    "    [Last-Take-Wins 過濾] 剔除 NG 重複句 (Sentence %s: '%s') -> 保留正式句 (Sentence %s: '%s')",
-                    s_curr.get("id"),
-                    s_curr.get("text", ""),
-                    s_later.get("id"),
-                    s_later.get("text", ""),
-                )
-                is_ng = True
-                break
-        if not is_ng:
-            kept.append(s_curr)
-    return kept
 
 
 def _find_best_char_span(tgt_norm: str, whisper_str: str) -> tuple[int, int, int] | None:
@@ -835,7 +815,6 @@ def _find_best_char_span(tgt_norm: str, whisper_str: str) -> tuple[int, int, int
             c_first, c_last, c_matched = cand
             c_span = c_last - c_first + 1
             best_span = best_last - best_first + 1
-            # Prefer a tighter, rightmost window that retains equivalent character coverage
             if c_matched >= max(best_matched - 1, int(t_len * 0.75)) and (
                 c_span < best_span - 1 or (c_span <= best_span and c_first > best_first)
             ):
@@ -1178,8 +1157,6 @@ def resolve_clip_sub_units(
         next_start = min(next_starts) if next_starts else None
 
         sub_text = " ".join(t for t in g["texts"] if t).strip()
-        # Preserve Gemini's cleaned transcript when the clip resolves to a single sub-unit,
-        # while always retaining raw Whisper words in `whisper_transcript` for dual-track auditing.
         primary_transcript = (clip_transcript if (is_single_group and clip_transcript) else sub_text) or clip_transcript
         sub_units.append({
             "sentence_ids": list(g["sentence_ids"]),
@@ -1267,7 +1244,6 @@ def calculate_active_script_window(
     if not whisper_units or not script_text or not script_text.strip():
         return 0.0, total_duration, whisper_units
 
-    # Extract meaningful spoken clauses from script (ignore markdown headers and stage brackets)
     raw_lines = re.split(r"[\n。！？!?；;]+", script_text)
     script_clauses = []
     for line in raw_lines:
@@ -1671,5 +1647,3 @@ def detect_chunk_boundaries(
         start_idx = split_idx + 1
 
     return chunks
-
-

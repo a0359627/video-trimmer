@@ -2,18 +2,19 @@
 """
 video-trimmer (AI-Powered Smart Video Trimmer)
 ---------------------------------------------
-An intelligent, end-to-end video rough-cut & trimming engine powered by:
-- Whisper word-level acoustic ground-truth (Apple Silicon mlx-whisper & faster-whisper)
-- Gemini 3.8 Flash multimodal video understanding & take selection
-- Acoustic Onset Snapping (Smart Gap Shortening: eliminating dead air & pre-speech pauses)
-- Adaptive noise floor tracking & equal-power audio micro-crossfades
-- Text-based locked timestamp precision
-- Export to Premiere Pro (XML), DaVinci Resolve (XML), Final Cut Pro (FCPXML), and direct MP4.
+An end-to-end video rough-cut and trimming engine powered by:
+- Whisper word-level acoustic ground truth (Apple Silicon mlx-whisper & faster-whisper)
+- Vertex AI Gemini 3.8 Flash multimodal video understanding and dual-mode take selection
+- Acoustic onset snapping (80ms pre-vocal onset) and plosive tail defense
+- Adaptive noise floor tracking and 20ms equal-power audio micro-crossfades
+- Export to Premiere Pro (.xml), DaVinci Resolve (.xml), Final Cut Pro (.fcpxml), CSV (.csv), and MP4.
 """
 
 import argparse
 import json
 import logging
+import math
+import os
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -24,15 +25,10 @@ try:
     import numpy as np  # noqa: F401  (used transitively by acoustic.py; kept for early dependency check)
     from google.genai import types
 except ImportError as e:
-    # 此處早於 main() 的 logging 設定即需中止，且是模組載入期的硬性依賴檢查
-    # （而非業務邏輯例外），故沿用 sys.exit()；仍改用 logging 而非 print()。
     logging.basicConfig(level=logging.ERROR, format="%(message)s", stream=sys.stderr)
-    logging.error("缺少必要套件: %s", e)
-    logging.error("請先執行: pip install -r requirements.txt")
+    logging.error("Missing required package: %s", e)
+    logging.error("Run: pip install -r requirements.txt")
     sys.exit(1)
-
-import math
-import os
 
 if __package__ in (None, ""):
     _skill_root = Path(__file__).resolve().parent.parent
@@ -77,7 +73,6 @@ from .assembly import (
     run_assembly_inference,
 )
 from .transcribe import (
-    align_clip_with_whisper,
     calculate_active_script_window,
     coalesce_adjacent_sub_units,
     detect_chunk_boundaries,
@@ -102,10 +97,14 @@ ORPHAN_WORDS = {"所以", "但是", "而且", "然而", "如果", "因為", "不
 
 
 def _prune_orphan_units(units: list[dict]) -> list[dict]:
-    """剔除孤立無效的連詞或語氣詞殘片：時長 < 2.5 秒且文本只有「所以」「但是」「好」等獨立殘句。
+    """
+    Drop isolated conjunction or particle fragments (Orphan Conjunction / Particle Filter).
 
-    Show Mode 的場外角色（role == "offscreen"）不在此剔除：場外的短反應（「好」「對」）是否入片，
-    由主提示詞的角色判定規則決定。
+    ASD-STE100:
+    Remove a unit when its normalized text has at most 2 characters, is in ORPHAN_WORDS
+    (for example 「所以」, 「但是」, 「好」), and lasts less than 2.5s.
+    Keep Show Mode off-screen units (role == "offscreen"): the master prompt decides
+    whether a short off-screen reaction stays in the cut.
     """
     pruned = []
     for u in units:
@@ -115,7 +114,7 @@ def _prune_orphan_units(units: list[dict]) -> list[dict]:
         norm_t = normalize_text(u.get("transcript", ""))
         dur_est = float(u.get("t_last", 0.0)) - float(u.get("t_first", 0.0))
         if len(norm_t) <= 2 and norm_t in ORPHAN_WORDS and dur_est < 2.5:
-            logger.info("    [孤立殘片剔除] 發現無效孤立詞片段 ('%s', 預估長度 %.2fs)，自動剔除！", u.get("transcript"), dur_est)
+            logger.info("    [Orphan Filter] Dropped isolated fragment ('%s', estimated %.2fs).", u.get("transcript"), dur_est)
             continue
         pruned.append(u)
     return pruned
@@ -128,12 +127,12 @@ def _setup_logging(verbose):
 
 def _validate_input_extension(video_path):
     if video_path.suffix.lower() not in ALLOWED_INPUT_EXTENSIONS:
-        allowed = "、".join(ALLOWED_INPUT_EXTENSIONS)
-        raise InvalidInputError(f"不支援的影片格式: {video_path.suffix}（允許的副檔名: {allowed}）")
+        allowed = ", ".join(ALLOWED_INPUT_EXTENSIONS)
+        raise InvalidInputError(f"Unsupported video format: {video_path.suffix} (allowed extensions: {allowed})")
 
 
 def _append_usage_log(out_dir, video_path, model, usage, mode, duration):
-    """獨立於 logging 系統之外，永遠記錄每次 Gemini 呼叫的 token 用量，供後續人工彙總成本。"""
+    """Append token usage metrics for each Gemini inference run to usage_log.jsonl."""
     usage_log_path = out_dir / "usage_log.jsonl"
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -171,32 +170,31 @@ def _run(args):
                 project_id=args.project,
             )
         except Exception as e:
-            raise InvalidInputError(f"從 Google Drive 讀取影片失敗: {e}") from e
+            raise InvalidInputError(f"Failed to download video from Google Drive: {e}") from e
     else:
         video_path = Path(args.input).expanduser().resolve()
         if not video_path.exists():
-            raise InvalidInputError(f"找不到影片檔案 {video_path}")
+            raise InvalidInputError(f"Video file not found: {video_path}")
         out_dir = _resolve_output_dir(args.output_dir, video_path.parent)
 
     _validate_input_extension(video_path)
     base_name = video_path.stem
 
-    # 決定輸出檔案標籤
     tag = args.suffix if args.suffix else ("agentic" if args.agentic else "static")
 
-    logger.info("==> 1. 檢測影片資訊: %s", video_path.name)
-    logger.info("    輸出目錄: %s", out_dir)
+    logger.info("==> 1. Probing input video: %s", video_path.name)
+    logger.info("    Output directory: %s", out_dir)
     total_dur, width, height, fps = probe_video(video_path)
-    logger.info("    時長: %.1f 秒 (~%.1f 分鐘) | 解析度: %dx%d | 幀率: %.3f fps",
+    logger.info("    Duration: %.1f s (~%.1f min) | Resolution: %dx%d | Frame rate: %.3f fps",
                 total_dur, total_dur / 60, width, height, fps)
 
-    # 第一階段：Whisper 微觀聲學時間戳轉錄 (Word-level Ground Truth) 與語意句子合併
+    # Layer 1: Whisper word-level acoustic transcription and clause segmentation
     whisper_segs = []
     whisper_sentences = []
 
     if not args.skip_whisper:
         whisper_json = out_dir / f"{base_name}_whisper_raw.json"
-        logger.info("==> 2. 執行 Whisper 微觀字級聲學時間戳轉錄與語意句子合併...")
+        logger.info("==> 2. Running Whisper word-level transcription and clause segmentation...")
         whisper_segs, whisper_sentences = transcribe_video_whisper(
             video_path,
             whisper_json,
@@ -223,7 +221,7 @@ def _run(args):
     )
     allow_reorder = bool(getattr(args, "allow_reorder", False))
 
-    # 第二階段：Gemini 宏觀多模態視訊理解與選鏡決策
+    # Layer 2: Gemini multimodal video understanding and dual-mode take arbitration
     inference_metrics = {}
     micro_window_repairs = []
     script_path = Path(args.script).resolve() if args.script else None
@@ -236,8 +234,8 @@ def _run(args):
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
         if not cached_file.exists():
-            raise InvalidInputError(f"找不到快取 JSON 檔案: {cached_file}")
-        logger.info("==> 3. 跳過 Gemini 模型分析，直接載入快取初剪決策: %s", cached_file.name)
+            raise InvalidInputError(f"Cached JSON file not found: {cached_file}")
+        logger.info("==> 3. Skipping Gemini inference and loading cached EDL: %s", cached_file.name)
         with open(cached_file, "r", encoding="utf-8") as f:
             model_edl = json.load(f)
     else:
@@ -254,7 +252,7 @@ def _run(args):
             *[p / "prompts" / "video_cut_prompt.md" for p in _resolved_file.parents[:5]],
         ]
 
-        # Step 3a: 若提供講稿且影片為長素材，先依據講稿語意句子定位有效視訊視窗
+        # Step 3a: Locate the active recording window when a reference script is provided on long footage
         win_start, win_end, active_units = 0.0, total_dur, whisper_units
         if window_script_text is not None and total_dur > 600.0 and whisper_units:
             win_start, win_end, active_units = calculate_active_script_window(
@@ -265,14 +263,14 @@ def _run(args):
             )
             if win_start > 0.0 or win_end < total_dur:
                 logger.info(
-                    "    [講稿視窗鎖定] 自動聚焦有效拍攝區間: %.1fs ~ %.1fs (跨度 %.1fs, 台詞 %d 句)",
+                    "    [Active Script Window] Focused recording window: %.1fs ~ %.1fs (span %.1fs, %d sentences)",
                     win_start,
                     win_end,
                     win_end - win_start,
                     len(active_units),
                 )
 
-        # Step 3b: 若有效區間超過 11 分鐘 (660s)，於自然停頓處 (>=2.0s) 自動切塊並避免切開重講群組
+        # Step 3b: Split long recordings (>660s) at natural pauses (>=2.0s) without splitting retake clusters
         chunks = detect_chunk_boundaries(
             whisper_units=active_units,
             total_duration=win_end,
@@ -299,11 +297,11 @@ def _run(args):
             logger.info("    [代理分析] 上傳與 Gemini 分析使用 %s；Whisper 時間戳與 XML 仍對原檔 %s",
                         analysis_source.name, video_path.name)
 
-        logger.info("==> 3. 準備視訊至 Cloud Storage 暫存...")
+        logger.info("==> 3. Staging video to Cloud Storage...")
         gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(analysis_source, resolved_bucket)
 
         mode_str = "Agentic Video Understanding" if args.agentic else "Static Multimodal"
-        logger.info("==> 4. 調用 %s [模式: %s] 結合 Whisper 劇本進行文字剪輯與選鏡決策...", args.model, mode_str)
+        logger.info("==> 4. Running %s [Mode: %s] with Whisper sentences for take arbitration...", args.model, mode_str)
 
         usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
         duration = 0.0
@@ -311,7 +309,7 @@ def _run(args):
 
         try:
             if len(chunks) > 1:
-                logger.info("    [長片自動分段] 有效跨度 %.1fs 分割為 %d 個自然停頓區段依序推論...", win_end - win_start, len(chunks))
+                logger.info("    [Auto-Chunking] Splitting %.1fs active span into %d natural-pause chunks...", win_end - win_start, len(chunks))
 
             for idx, (c_start, c_end, c_units) in enumerate(chunks, start=1):
                 c_prompt = build_prompt(
@@ -326,7 +324,7 @@ def _run(args):
 
                 if len(chunks) > 1:
                     logger.info(
-                        "    ---> Chunk %d/%d: 視訊區間 %s ~ %s (%.1fs, %d 句台詞)",
+                        "    ---> Chunk %d/%d: Window %s ~ %s (%.1fs, %d sentences)",
                         idx,
                         len(chunks),
                         start_offset,
@@ -429,8 +427,8 @@ def _run(args):
             if is_ephemeral and not args.keep_gcs_upload:
                 delete_gcs_blob(gcs_uri)
 
-        logger.info("    模型推論完成 (耗時 %.1f 秒)！", duration)
-        logger.info("    Token 統計: 輸入=%s | 輸出=%s | 思維=%s | 工具探索=%s | 總計=%s",
+        logger.info("    Model inference complete (%.1f s).", duration)
+        logger.info("    Token usage: prompt=%s | candidates=%s | thoughts=%s | tool_use=%s | total=%s",
                     f"{usage['prompt_tokens']:,}", f"{usage['candidates_tokens']:,}",
                     f"{usage['thoughts_tokens']:,}", f"{usage['tool_use_tokens']:,}", f"{usage['total_tokens']:,}")
 
@@ -447,8 +445,8 @@ def _run(args):
         }
         _append_usage_log(out_dir, video_path, args.model, usage, mode, duration)
 
-    # 第三階段：文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)
-    logger.info("==> 5. 執行文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)...")
+    # Layer 3 & Layer 4: Sub-unit word trimming, cross-clip coalescing, and acoustic onset snapping
+    logger.info("==> 5. Running text-locked word boundary trimming and acoustic onset snapping...")
     temp_wav = out_dir / f"temp_{base_name}.wav"
     subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -484,8 +482,8 @@ def _run(args):
         )
 
     # Show Mode 節奏參數：想法內部的停頓可以保留（keep_pause），想法結束後多留一點尾音（tail_pad）
-    # 未指定 --keep-pause-sec 時沿用 transcribe.py 的 conform 調校預設值
-    # （resolve_clip_sub_units: max_internal_gap=0.65 / max_word_gap=0.70；coalesce: 0.65）。
+    # Without --keep-pause-sec, keep the conform-tuned defaults in transcribe.py
+    # (resolve_clip_sub_units: max_internal_gap=0.65 / max_word_gap=0.70; coalesce: 0.65).
     keep_pause_arg = getattr(args, "keep_pause_sec", None)
     keep_pause = float(keep_pause_arg) if keep_pause_arg is not None else None
     tail_pad = float(getattr(args, "tail_pad_sec", 0.0) or 0.0)
@@ -523,10 +521,9 @@ def _run(args):
     # Trim tail-to-head text overlaps and head stutters across adjacent EDL cut seams
     filtered_units = trim_cross_clip_seam_overlaps(filtered_units, whisper_units)
 
-    # 5b. 過濾孤立無效的連詞或語氣詞殘片 (Orphan Conjunction / Particle Filter)
+    # Drop isolated conjunction / particle fragments (Orphan Conjunction / Particle Filter)
     filtered_units = _prune_orphan_units(filtered_units)
 
-    # 5c. 針對每個保留子片段獨立執行聲學包絡收緊與微呼吸邊界鎖定
     refined_edl = []
     for seq_id, su in enumerate(filtered_units, start=1):
         c = su["parent_clip"]
@@ -570,22 +567,22 @@ def _run(args):
             "segment": c.get("segment", ""),
             "timeline_position": c.get("timeline_position"),
             "take_selection_reason": c.get("take_selection_reason", ""),
-            "visual_check": c.get("visual_check", "眼神直視鏡頭就緒，無眨眼閉眼"),
-            "audio_check": c.get("audio_check", f"Whisper精準錨定 (In前置氣息={in_m:.2f}s, Out俐落收口={out_m:.2f}s)")
+            "visual_check": c.get("visual_check", "Direct eye contact with camera, eyes open."),
+            "audio_check": c.get("audio_check", f"Whisper locked (in_margin={in_m:.2f}s, out_margin={out_m:.2f}s)")
         })
-        logger.info("    Clip %2d: In=%6.2fs, Out=%6.2fs (%5.2fs) | 首字: %.2fs, 尾字: %.2fs | %s",
+        logger.info("    Clip %2d: In=%6.2fs, Out=%6.2fs (%5.2fs) | t_first: %.2fs, t_last: %.2fs | %s",
                     seq_id, tight_in, tight_out, dur, t_first, t_last, su["topic"])
 
     temp_wav.unlink(missing_ok=True)
 
-    # 5d. 物理時間軸確定性自癒 (Overlap De-confliction, Plosive Tail Floor, Micro-Clip Coalescing)
+    # Layer 5: Deterministic timeline sanitization and 8-dimension rough-cut quality audit
     refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur, allow_reorder=allow_reorder)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
     avg_cps = round(sum(c["cps"] for c in refined_edl) / max(1, len(refined_edl)), 2)
-    logger.info("    初剪片段數: %d | 成片預計長度: %.1f 秒 (~%.2f 分鐘) | 全片平均語速: %.2f 字/秒",
+    logger.info("    Retained clips: %d | Trimmed duration: %.1f s (~%.2f min) | Average CPS: %.2f chars/s",
                 len(refined_edl), total_out_dur, total_out_dur / 60, avg_cps)
 
-    # 5e. 執行 8 維度粗剪品質審計 (8-Dimension Rough-Cut Quality Audit & agent_verdict)
+    # Flags carried into the audit remediation_cmd (Show Mode, render and XML profile options)
     show_mode_flags = []
     if getattr(args, "prompt", None):
         show_mode_flags.append(f'--prompt "{args.prompt}"')
@@ -629,13 +626,12 @@ def _run(args):
     generate_edl_audit_markdown(audit_report, report_md_path)
     verdict = audit_report["agent_verdict"]
     logger.info(
-        "    [品質審計] 等級: %s | 通過品質閘門: %s | 報告: %s",
+        "    [Quality Audit] Grade: %s | Pass Quality Gate: %s | Report: %s",
         verdict["overall_grade"],
         verdict["pass_quality_gate"],
         report_md_path.name,
     )
 
-    # 輸出資料
     json_path = out_dir / f"{base_name}_{tag}_edl.json"
     json_path.write_text(json.dumps({
         "project_title": f"{base_name} AI Video Trimmer ({tag})",
@@ -646,44 +642,46 @@ def _run(args):
         "total_duration": total_out_dur,
         "final_edl": refined_edl
     }, ensure_ascii=False, indent=2), encoding="utf-8")
-    logger.info("==> 6. 輸出結構化資料與審計報告: %s, %s", json_path.name, report_json_path.name)
+    logger.info("==> 6. Wrote structured EDL JSON and audit report: %s, %s", json_path.name, report_json_path.name)
 
     csv_path = out_dir / f"{base_name}_{tag}_edl.csv"
     generate_edl_csv(refined_edl, csv_path)
-    logger.info("==> 7. 輸出表格清單: %s", csv_path.name)
+    logger.info("==> 7. Wrote CSV cut table: %s", csv_path.name)
 
-    # FCP7 XML：premiere（預設）= Premiere Pro 口味結構；davinci = 同一結構，<file><timecode> 直通相機時間碼且不寫 <frame>
+    # FCP 7 XML: premiere (default) = Premiere Pro structure; davinci = same structure with the camera
+    # timecode passed through in <file><timecode> and no <frame> tag
     cam_tc = None
     if xml_profile == "davinci":
         cam_tc = get_video_timecode(video_path)
         if cam_tc != "00:00:00:00":
-            logger.info("    [相機時間碼] 偵測到內嵌機身時間碼: %s，寫入 XML 以防 DaVinci Resolve 脫機", cam_tc)
+            logger.info("    [Camera Timecode] Embedded camera timecode %s written to the XML to prevent DaVinci Resolve media offline.", cam_tc)
 
     xml_path = out_dir / f"{base_name}_{tag}_edl.xml"
     generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps,
                       start_tc=cam_tc, xml_profile=xml_profile)
-    logger.info("==> 8. 輸出通用剪輯工程檔 (FCP7 XML, profile=%s): %s", xml_profile, xml_path.name)
+    logger.info("==> 8. Wrote FCP 7 XML timeline (profile=%s): %s", xml_profile, xml_path.name)
 
     fcpxml_path = out_dir / f"{base_name}_{tag}_edl.fcpxml"
-    generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps)
-    logger.info("==> 9. 輸出 Final Cut Pro X 工程檔: %s", fcpxml_path.name)
+    generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps, width, height)
+    logger.info("==> 9. Wrote Final Cut Pro FCPXML timeline: %s", fcpxml_path.name)
 
-    # conform 的精簡剪輯明細表。`_edl_report.md` 已是 8 維度審計報告（agent_verdict），改寫到 `_edl_summary.md` 以免互相覆蓋。
+    # Conform clip summary table. `_edl_report.md` is the 8-dimension audit report (agent_verdict),
+    # so the summary goes to `_edl_summary.md` and never overwrites it.
     summary_path = out_dir / f"{base_name}_{tag}_edl_summary.md"
     generate_edl_report(refined_edl, total_dur, summary_path, base_name=f"{base_name} ({tag})")
-    logger.info("==> 10. 輸出剪輯明細表: %s", summary_path.name)
+    logger.info("==> 10. Wrote Markdown clip summary: %s", summary_path.name)
 
     if getattr(args, "xml_only", False) or getattr(args, "no_render", False):
-        logger.info("==> 11. 已指定 --xml-only / --no-render，略過 FFmpeg 渲染成片。")
-        logger.info("==> [完成] 剪輯工程檔已產出: %s", xml_path.name)
+        logger.info("==> 11. --xml-only / --no-render set: skipping the FFmpeg MP4 render.")
+        logger.info("==> [Done] NLE timelines written: %s", xml_path.name)
     else:
         out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
-        logger.info("==> 11. FFmpeg 渲染成片: %s ...", out_mp4.name)
+        logger.info("==> 11. Rendering rough-cut MP4 with FFmpeg: %s ...", out_mp4.name)
         render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
-        logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
+        logger.info("==> [Done] Final MP4 rendered (%.1f MB): %s", out_mp4.stat().st_size / (1024 * 1024), out_mp4.name)
 
     if args.strict and not verdict["pass_quality_gate"]:
-        logger.error("==> [嚴格品質閘門未通過] %s", "; ".join(verdict["fatal_violations"]))
+        logger.error("==> [Strict Quality Gate Failed] %s", "; ".join(verdict["fatal_violations"]))
         sys.exit(2)
 
 
@@ -692,28 +690,28 @@ def main():
     default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
 
     parser = argparse.ArgumentParser(description="video-trimmer: AI-Powered Smart Video Trimmer (Whisper Ground-Truth + Vertex AI Gemini)")
-    parser.add_argument("--input", "-i", required=True, help="輸入影片檔案路徑 (MP4/MOV) 或 Google Drive 分享連結 (https://drive.google.com/... / gdrive://...)")
-    parser.add_argument("--output-dir", "-o", default=None, help="輸出資料夾 (預設為 <影片所在目錄>/output/，Google Drive 連結則為 ./output/)")
-    parser.add_argument("--model", "-m", default=default_model, help=f"使用的 Gemini 模型名稱 (預設: {default_model})")
-    parser.add_argument("--project", default=None, help="Google Cloud 專案 ID (預設讀取 GOOGLE_CLOUD_PROJECT/GCP_PROJECT 或 ADC)")
-    parser.add_argument("--region", default=None, help="Vertex AI 區域/位置 (預設讀取 GOOGLE_CLOUD_LOCATION/GCP_REGION 或 'global')")
-    parser.add_argument("--bucket", default=None, help="用於暫存視訊的 GCS Bucket (預設讀取 VIDEO_TRIMMER_BUCKET)")
-    parser.add_argument("--keep-gcs-upload", action="store_true", help="保留上傳至 GCS 的暫存視訊，不於推論後自動清理")
-    parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
-    parser.add_argument("--no-render", action="store_true", help="跳過 FFmpeg 最終成片渲染，僅輸出工程檔與清單（與 --xml-only 同義）")
+    parser.add_argument("--input", "-i", required=True, help="Path to input video file (.mp4/.mov) or Google Drive share link (https://drive.google.com/... / gdrive://...)")
+    parser.add_argument("--output-dir", "-o", default=None, help="Output directory (defaults to <input_dir>/output/, or ./output/ for Google Drive links)")
+    parser.add_argument("--model", "-m", default=default_model, help=f"Gemini model name (default: {default_model})")
+    parser.add_argument("--project", default=None, help="Google Cloud Project ID (defaults to GOOGLE_CLOUD_PROJECT/GCP_PROJECT or ADC)")
+    parser.add_argument("--region", default=None, help="Vertex AI region/location (defaults to GOOGLE_CLOUD_LOCATION/GCP_REGION or 'global')")
+    parser.add_argument("--bucket", default=None, help="GCS bucket for video staging (defaults to VIDEO_TRIMMER_BUCKET)")
+    parser.add_argument("--keep-gcs-upload", action="store_true", help="Retain staged video in GCS instead of deleting after inference")
+    parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 CRF quality parameter (default: 18)")
+    parser.add_argument("--no-render", action="store_true", help="Skip the FFmpeg MP4 render; write timelines and tables only (same as --xml-only)")
     parser.add_argument("--xml-profile", choices=list(XML_PROFILES), default="premiere",
-                        help="FCP7 XML 口味：premiere（預設，Premiere Pro 結構）或 davinci"
-                             "（同結構，<file><timecode> 直通相機時間碼且不寫 <frame>，xmeml v5，供 DaVinci Resolve 匯入）")
+                        help="FCP 7 XML profile: 'premiere' (default, Premiere Pro structure) or 'davinci' "
+                             "(same structure, xmeml v5, camera timecode in <file><timecode> without <frame>, for DaVinci Resolve)")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
-                        help="剪輯節奏風格: 'auto'/'dynamic' (文字剪輯微氣息鎖定, 推薦預設)")
-    parser.add_argument("--agentic", action="store_true", help="啟用 Gemini Agentic Video Understanding 動態探索模式")
-    parser.add_argument("--suffix", default=None, help="自訂輸出檔案名稱標籤後綴 (預設為 agentic 或 static)")
-    parser.add_argument("--script", "-s", default=None, help="可選的分鏡講稿或文本檔案路徑 (TXT/MD)")
+                        help="Pacing style: 'auto'/'dynamic' (adaptive CPS margin, default), 'compact', or 'breathing'")
+    parser.add_argument("--agentic", action="store_true", help="Enable Gemini Agentic Video Understanding mode")
+    parser.add_argument("--suffix", default=None, help="Custom filename tag suffix (defaults to 'agentic' or 'static')")
+    parser.add_argument("--script", "-s", default=None, help="Optional reference shooting script or outline (.txt/.md)")
     parser.add_argument("--cached-json", default=None,
-                        help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析")
-    parser.add_argument("--skip-whisper", action="store_true", help="跳過本地 Whisper 轉錄，僅使用純能量檢測")
-    parser.add_argument("--strict", action="store_true", help="啟用嚴格品質閘門 (若 agent_verdict.pass_quality_gate 為 false 則於輸出報告後以 exit code 2 結束)")
-    parser.add_argument("--verbose", action="store_true", help="輸出詳細除錯訊息 (DEBUG level)")
+                        help="Path to an existing EDL JSON file to bypass cloud Gemini inference")
+    parser.add_argument("--skip-whisper", action="store_true", help="Skip local Whisper transcription and use energy-only fallback")
+    parser.add_argument("--strict", action="store_true", help="Exit with code 2 after writing audit reports if agent_verdict.pass_quality_gate is False")
+    parser.add_argument("--verbose", action="store_true", help="Enable verbose DEBUG-level logging")
     # Show Mode（節目型拍帶：主持人 + 場外聲音角色）。以下旗標預設全部關閉，不影響原有行為。
     show = parser.add_argument_group("Show Mode（主持人 + 場外聲音角色）")
     show.add_argument("--prompt", default=None,
@@ -745,10 +743,9 @@ def main():
     try:
         _run(args)
     except VideoTrimmerError as e:
-        logger.error("錯誤: %s", e)
+        logger.error("Error: %s", e)
         sys.exit(1)
 
 
 if __name__ == "__main__":
     main()
-

@@ -65,7 +65,7 @@ video-trimmer/
    - **Mode B (No `--script`)**: Unscripted Intent-Window arbitration pruning abandoned fragments while preserving intentional rhetorical repetition.
 3. **Multimodal Active Speaker Diarization (Gemini 3.8 Flash)**:
    - Evaluates on-camera visual cues (camera gaze, mouth articulatory sync, body language) and audio acoustics (close lavalier mic vs distant room echo).
-   - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "CTA-S2", "CDA84") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
+   - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "Scene 1", "Take 2") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
 4. **Word-Level Acoustic Ground Truth & Global Cross-Clip Coalescing**:
    - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps segmented purely on physical breath pauses and punctuation closure.
    - Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`) automatically merges consecutive `Sentence ID`s across adjacent clips when `gap < 0.65s` (default; Show Mode `--keep-pause-sec` overrides it), eliminating artificial internal jump-cuts.
@@ -74,7 +74,7 @@ video-trimmer/
 6. **Word Ground Truth Tail & Continuous Phonation Protection**:
    - Strictly enforces `true_speech_end >= t_last` with forward-only tracking down to ambient room noise.
    - Continuous Phonation Invariant: When `tail_gap < 0.18s` (speaker in continuous speech flow), trailing words are never trimmed even if omitted from the prompt transcript, completely preserving trailing phonemes and words. Only explicit blooper tokens from the managed whitelist are pruned, or tail words that Whisper duplicated into the time range of the next sentence.
-   - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` in words like「台」) and soft trailing nasal vowels without clipping word endings.
+   - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` stops) and soft trailing nasal vowels without clipping word endings.
 7. **20ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
    - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and `afade` equal-power micro-fades (`iqsin`/`qsin`, length `CROSSFADE_DURATION_SEC` = 20ms in `constants.py`) across all cut boundaries.
 8. **Production Script Injection (`--script`)**:

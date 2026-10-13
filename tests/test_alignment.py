@@ -4,7 +4,7 @@ import pytest
 
 from pathlib import Path
 import tempfile
-from scripts.gemini_client import build_prompt, format_script_blocks_for_prompt
+from scripts.gemini_client import build_prompt
 from scripts.transcribe import (
     align_clip_with_whisper,
     coalesce_adjacent_sub_units,
@@ -183,7 +183,9 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         assert coalesced[1]["t_first"] == pytest.approx(51.60)
 
     def test_dual_mode_prompt_formatting_mode_a_and_mode_b(self):
-        """Verify build_prompt generates Mode A numbered script blocks with script_path and Mode B without script_path."""
+        """Verify build_prompt generates Mode A numbered script blocks with script_path and Mode B without script_path in 100% English."""
+        import re
+
         prompt_candidates = [
             Path(__file__).resolve().parent.parent
             / "skills"
@@ -191,22 +193,27 @@ class TestAlignClipWithWhisper(unittest.TestCase):
             / "prompts"
             / "video_cut_prompt.md"
         ]
-        units = _build_units()
+        en_units = [
+            _sentence(1, 0.0, 1.0, "Hello everyone", _words_for("Hello everyone", 0.0, 1.0)),
+            _sentence(2, 1.2, 2.4, "Today we test the system", _words_for("Today we test the system", 1.2, 1.2)),
+        ]
 
         # Mode B (no script)
-        prompt_b = build_prompt(prompt_candidates, script_path=None, whisper_units=units)
+        prompt_b = build_prompt(prompt_candidates, script_path=None, whisper_units=en_units)
         assert "Mode B: Unscripted Intent-Window Take Arbitration (Active)" in prompt_b
-        assert "請訂閱，請訂閱，請訂閱，重要的事情要說三遍" in prompt_b
+        assert "repeating a key phrase three times for emphasis" in prompt_b
+        assert not re.search(r"[\u4e00-\u9fff]", prompt_b)
 
         # Mode A (with script)
         with tempfile.NamedTemporaryFile("w", suffix=".md", delete=False, encoding="utf-8") as tmp:
-            tmp.write("# Section 1\n第一段講稿內容\n第二段講稿內容\n")
+            tmp.write("# Section 1\nFirst paragraph of the shooting script.\nSecond paragraph of the shooting script.\n")
             tmp_path = Path(tmp.name)
         try:
-            prompt_a = build_prompt(prompt_candidates, script_path=tmp_path, whisper_units=units)
+            prompt_a = build_prompt(prompt_candidates, script_path=tmp_path, whisper_units=en_units)
             assert "Mode A: Monotonic Script-Anchored Take Arbitration (Active)" in prompt_a
-            assert "[Script Block 01] 第一段講稿內容" in prompt_a
-            assert "[Script Block 02] 第二段講稿內容" in prompt_a
+            assert "[Script Block 01] First paragraph of the shooting script." in prompt_a
+            assert "[Script Block 02] Second paragraph of the shooting script." in prompt_a
+            assert not re.search(r"[\u4e00-\u9fff]", prompt_a)
         finally:
             tmp_path.unlink(missing_ok=True)
 
