@@ -50,7 +50,14 @@ from .edl_auditor import (
     sanitize_refined_edl,
 )
 from .exceptions import GeminiAPIError, InvalidInputError, VideoTrimmerError
-from .exporters import generate_edl_csv, generate_fcp7_xml, generate_fcpxml
+from .exporters import (
+    XML_PROFILES,
+    generate_edl_csv,
+    generate_edl_report,
+    generate_fcp7_xml,
+    generate_fcpxml,
+    get_video_timecode,
+)
 from .gcs_utils import delete_gcs_blob, is_gdrive_source, download_gdrive_file_with_cache
 from .gemini_client import (
     build_micro_window_repair_prompt,
@@ -76,17 +83,42 @@ from .transcribe import (
     detect_chunk_boundaries,
     resolve_clip_sub_units,
     transcribe_video_whisper,
+    trim_cross_clip_seam_overlaps,
+    normalize_text,
 )
 
 logger = logging.getLogger(__name__)
 
 
 def _parse_gemini_json_text(raw_json: str) -> dict:
-    """Clean markdown fences and parse JSON returned by Gemini (object, bare array or single clip)."""
+    """Clean markdown fences and parse JSON returned by Gemini (object, bare array, bracketless objects or single clip)."""
     try:
         return parse_edl_json_text(raw_json)
     except GeminiAPIError as e:
         raise VideoTrimmerError(str(e)) from e
+
+
+ORPHAN_WORDS = {"所以", "但是", "而且", "然而", "如果", "因為", "不過", "雖然", "或是", "或者", "好", "對", "ok", "OK"}
+
+
+def _prune_orphan_units(units: list[dict]) -> list[dict]:
+    """剔除孤立無效的連詞或語氣詞殘片：時長 < 2.5 秒且文本只有「所以」「但是」「好」等獨立殘句。
+
+    Show Mode 的場外角色（role == "offscreen"）不在此剔除：場外的短反應（「好」「對」）是否入片，
+    由主提示詞的角色判定規則決定。
+    """
+    pruned = []
+    for u in units:
+        if str(u.get("role", "host")).lower() == "offscreen":
+            pruned.append(u)
+            continue
+        norm_t = normalize_text(u.get("transcript", ""))
+        dur_est = float(u.get("t_last", 0.0)) - float(u.get("t_first", 0.0))
+        if len(norm_t) <= 2 and norm_t in ORPHAN_WORDS and dur_est < 2.5:
+            logger.info("    [孤立殘片剔除] 發現無效孤立詞片段 ('%s', 預估長度 %.2fs)，自動剔除！", u.get("transcript"), dur_est)
+            continue
+        pruned.append(u)
+    return pruned
 
 
 def _setup_logging(verbose):
@@ -229,7 +261,7 @@ def _run(args):
                 whisper_units=whisper_units,
                 script_text=window_script_text,
                 total_duration=total_dur,
-                padding_seconds=20.0,
+                padding_seconds=2.0,
             )
             if win_start > 0.0 or win_end < total_dur:
                 logger.info(
@@ -452,15 +484,19 @@ def _run(args):
         )
 
     # Show Mode 節奏參數：想法內部的停頓可以保留（keep_pause），想法結束後多留一點尾音（tail_pad）
-    keep_pause = float(getattr(args, "keep_pause_sec", 0.40) or 0.40)
+    # 未指定 --keep-pause-sec 時沿用 transcribe.py 的 conform 調校預設值
+    # （resolve_clip_sub_units: max_internal_gap=0.65 / max_word_gap=0.70；coalesce: 0.65）。
+    keep_pause_arg = getattr(args, "keep_pause_sec", None)
+    keep_pause = float(keep_pause_arg) if keep_pause_arg is not None else None
     tail_pad = float(getattr(args, "tail_pad_sec", 0.0) or 0.0)
+    resolve_gap_kwargs = (
+        {"max_internal_gap": keep_pause, "max_word_gap": max(0.45, keep_pause)} if keep_pause is not None else {}
+    )
+    coalesce_gap_kwargs = {"max_internal_gap": keep_pause} if keep_pause is not None else {}
 
     expanded_units = []
     for c in model_edl.get("final_edl", []):
-        sub_units = resolve_clip_sub_units(
-            whisper_units, c, total_dur,
-            max_internal_gap=keep_pause, max_word_gap=max(0.45, keep_pause),
-        )
+        sub_units = resolve_clip_sub_units(whisper_units, c, total_dur, **resolve_gap_kwargs)
         base_topic = str(c.get("topic", ""))
         if str(c.get("role", "host")).lower() == "offscreen":
             base_topic = f"[場外] {base_topic}"
@@ -478,10 +514,17 @@ def _run(args):
                 "whisper_transcript": su.get("whisper_transcript", su["transcript"]),
                 "trimmed_head": su.get("trimmed_head", False),
                 "trimmed_tail": su.get("trimmed_tail", False),
+                "role": str(c.get("role", "host")).lower(),
             })
 
     # Coalesce adjacent continuous sub-units across clip boundaries when gap < keep_pause and no ID is skipped
-    filtered_units = coalesce_adjacent_sub_units(expanded_units, max_internal_gap=keep_pause)
+    filtered_units = coalesce_adjacent_sub_units(expanded_units, **coalesce_gap_kwargs)
+
+    # Trim tail-to-head text overlaps and head stutters across adjacent EDL cut seams
+    filtered_units = trim_cross_clip_seam_overlaps(filtered_units, whisper_units)
+
+    # 5b. 過濾孤立無效的連詞或語氣詞殘片 (Orphan Conjunction / Particle Filter)
+    filtered_units = _prune_orphan_units(filtered_units)
 
     # 5c. 針對每個保留子片段獨立執行聲學包絡收緊與微呼吸邊界鎖定
     refined_edl = []
@@ -560,6 +603,11 @@ def _run(args):
         show_mode_flags.append("--xml-only")
     if getattr(args, "repeats_as_warnings", False):
         show_mode_flags.append("--repeats-as-warnings")
+    if getattr(args, "no_render", False):
+        show_mode_flags.append("--no-render")
+    xml_profile = str(getattr(args, "xml_profile", "premiere") or "premiere").lower()
+    if xml_profile != "premiere":
+        show_mode_flags.append(f"--xml-profile {xml_profile}")
 
     audit_report = audit_edl_quality(
         refined_edl=refined_edl,
@@ -604,20 +652,33 @@ def _run(args):
     generate_edl_csv(refined_edl, csv_path)
     logger.info("==> 7. 輸出表格清單: %s", csv_path.name)
 
+    # FCP7 XML：premiere（預設）= Premiere Pro 口味結構；davinci = 同一結構，<file><timecode> 直通相機時間碼且不寫 <frame>
+    cam_tc = None
+    if xml_profile == "davinci":
+        cam_tc = get_video_timecode(video_path)
+        if cam_tc != "00:00:00:00":
+            logger.info("    [相機時間碼] 偵測到內嵌機身時間碼: %s，寫入 XML 以防 DaVinci Resolve 脫機", cam_tc)
+
     xml_path = out_dir / f"{base_name}_{tag}_edl.xml"
-    generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps)
-    logger.info("==> 8. 輸出通用剪輯工程檔: %s", xml_path.name)
+    generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps,
+                      start_tc=cam_tc, xml_profile=xml_profile)
+    logger.info("==> 8. 輸出通用剪輯工程檔 (FCP7 XML, profile=%s): %s", xml_profile, xml_path.name)
 
     fcpxml_path = out_dir / f"{base_name}_{tag}_edl.fcpxml"
     generate_fcpxml(refined_edl, video_path, total_dur, total_out_dur, fcpxml_path, fps)
     logger.info("==> 9. 輸出 Final Cut Pro X 工程檔: %s", fcpxml_path.name)
 
-    if getattr(args, "xml_only", False):
-        logger.info("==> 10. 已指定 --xml-only，略過 FFmpeg 渲染成片。")
+    # conform 的精簡剪輯明細表。`_edl_report.md` 已是 8 維度審計報告（agent_verdict），改寫到 `_edl_summary.md` 以免互相覆蓋。
+    summary_path = out_dir / f"{base_name}_{tag}_edl_summary.md"
+    generate_edl_report(refined_edl, total_dur, summary_path, base_name=f"{base_name} ({tag})")
+    logger.info("==> 10. 輸出剪輯明細表: %s", summary_path.name)
+
+    if getattr(args, "xml_only", False) or getattr(args, "no_render", False):
+        logger.info("==> 11. 已指定 --xml-only / --no-render，略過 FFmpeg 渲染成片。")
         logger.info("==> [完成] 剪輯工程檔已產出: %s", xml_path.name)
     else:
         out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
-        logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
+        logger.info("==> 11. FFmpeg 渲染成片: %s ...", out_mp4.name)
         render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
         logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
 
@@ -639,6 +700,10 @@ def main():
     parser.add_argument("--bucket", default=None, help="用於暫存視訊的 GCS Bucket (預設讀取 VIDEO_TRIMMER_BUCKET)")
     parser.add_argument("--keep-gcs-upload", action="store_true", help="保留上傳至 GCS 的暫存視訊，不於推論後自動清理")
     parser.add_argument("--crf", type=int, default=18, help="FFmpeg H.264 畫質參數 (預設 18)")
+    parser.add_argument("--no-render", action="store_true", help="跳過 FFmpeg 最終成片渲染，僅輸出工程檔與清單（與 --xml-only 同義）")
+    parser.add_argument("--xml-profile", choices=list(XML_PROFILES), default="premiere",
+                        help="FCP7 XML 口味：premiere（預設，Premiere Pro 結構）或 davinci"
+                             "（同結構，<file><timecode> 直通相機時間碼且不寫 <frame>，xmeml v5，供 DaVinci Resolve 匯入）")
     parser.add_argument("--pacing", "-p", choices=["auto", "dynamic", "compact", "breathing"], default="auto",
                         help="剪輯節奏風格: 'auto'/'dynamic' (文字剪輯微氣息鎖定, 推薦預設)")
     parser.add_argument("--agentic", action="store_true", help="啟用 Gemini Agentic Video Understanding 動態探索模式")
@@ -666,8 +731,9 @@ def main():
     show.add_argument("--xml-only", action="store_true", help="只輸出 JSON/CSV/XML/FCPXML 與審計報告，不渲染 MP4")
     show.add_argument("--repeats-as-warnings", action="store_true",
                       help="句內重複字句改列為警告而非 fatal（節目型拍帶常有刻意排比與重複，模型已在局部重掃確認）")
-    show.add_argument("--keep-pause-sec", type=float, default=0.40,
-                      help="想法內部可保留的停頓上限（秒）；小於此值的停頓不切開、連續句子合併成一個 clip。預設 0.40，節目型建議 1.0")
+    show.add_argument("--keep-pause-sec", type=float, default=None,
+                      help="想法內部可保留的停頓上限（秒）；小於此值的停頓不切開、連續句子合併成一個 clip。"
+                           "未指定時沿用預設調校（句間 0.65 / 字間 0.70），節目型建議 1.0")
     show.add_argument("--tail-pad-sec", type=float, default=0.0,
                       help="每個 clip 尾字之後多留的時間（秒），讓想法落地；不會跨進下一句開口。預設 0，節目型建議 0.25")
     show.add_argument("--transcribe-only", action="store_true",

@@ -309,5 +309,78 @@ class TestModeCPrompt(unittest.TestCase):
             assert "Mode A" in text_a and "[Script Block 01]" in text_a
 
 
+class TestShowModeWithConformRules(unittest.TestCase):
+    """show-mode 與 conform（DaVinci / 連續發音保護 / seam 修法）合併後的交界行為。"""
+
+    def test_incomplete_syntax_protection_never_merges_across_role_change(self):
+        # HOST 句尾是介系詞「的」，緊接著 OFFSCREEN 開口：conform 的 Rule 8b 不可蓋掉角色切換拆句
+        segs = [
+            {"id": 1, "start": 0.0, "end": 1.0, "text": "這是我們的", "words": [],
+             "speaker_id": ROLE_HOST, "is_target_speaker": True},
+            {"id": 2, "start": 1.3, "end": 2.0, "text": "什麼東西啊", "words": [],
+             "speaker_id": ROLE_OFFSCREEN, "is_target_speaker": True},
+        ]
+        sentences = merge_whisper_segments_to_sentences(segs)
+        assert [s["speaker_id"] for s in sentences] == [ROLE_HOST, ROLE_OFFSCREEN]
+        # 同一角色時 conform 的介系詞保護照舊生效
+        same = [dict(segs[0]), dict(segs[1], speaker_id=ROLE_HOST)]
+        assert len(merge_whisper_segments_to_sentences(same)) == 1
+
+    def test_seam_overlap_rules_skip_dialogue_between_roles(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        words = _words([("所以說人類", 10.0, 11.0), ("所以說人類", 12.0, 13.0), ("不是從猴子變來的", 13.0, 15.0)])
+        whisper_units = [{"id": 1, "start": 10.0, "end": 15.0, "text": "", "words": words}]
+
+        def units(role_a, role_b):
+            return [
+                {"t_first": 10.0, "t_last": 11.0, "transcript": "所以說人類", "role": role_a},
+                {"t_first": 12.0, "t_last": 15.0, "transcript": "所以說人類不是從猴子變來的", "role": role_b},
+            ]
+
+        # 同角色：conform 的 seam prefix duplicate 剔除前一個棄用假開頭
+        assert len(trim_cross_clip_seam_overlaps(units("host", "host"), whisper_units)) == 1
+        # 場外問、主持人複述：是對話，不是重講
+        kept = trim_cross_clip_seam_overlaps(units("offscreen", "host"), whisper_units)
+        assert [u["role"] for u in kept] == ["offscreen", "host"]
+
+    def test_seam_overlap_rules_skip_reordered_seams(self):
+        from scripts.transcribe import trim_cross_clip_seam_overlaps
+
+        words = _words([("你大概也聽過WiFi", 10.0, 12.0), ("訊號撞到人體", 12.0, 13.0),
+                        ("訊號撞到人體會衰減", 20.0, 22.0)])
+        whisper_units = [{"id": 1, "start": 10.0, "end": 22.0, "text": "", "words": words}]
+        # --allow-reorder：時間軸上後一個 clip 來自更早的原片位置
+        units = [
+            {"t_first": 20.0, "t_last": 22.0, "transcript": "訊號撞到人體會衰減", "role": "host"},
+            {"t_first": 10.0, "t_last": 13.0, "transcript": "你大概也聽過WiFi訊號撞到人體", "role": "host"},
+        ]
+        out = trim_cross_clip_seam_overlaps([dict(u) for u in units], whisper_units)
+        assert [(u["t_first"], u["t_last"]) for u in out] == [(20.0, 22.0), (10.0, 13.0)]
+        assert "next_sentence_start" not in out[0]
+
+    def test_coalesce_never_merges_host_and_offscreen_units(self):
+        from scripts.transcribe import coalesce_adjacent_sub_units
+
+        units = [
+            {"sentence_ids": [1], "t_first": 0.0, "t_last": 1.0, "transcript": "主持人說", "role": "host"},
+            {"sentence_ids": [2], "t_first": 1.1, "t_last": 2.0, "transcript": "導演問", "role": "offscreen"},
+        ]
+        assert len(coalesce_adjacent_sub_units(units, max_internal_gap=1.0)) == 2
+        units[1]["role"] = "host"
+        assert len(coalesce_adjacent_sub_units(units, max_internal_gap=1.0)) == 1
+
+    def test_orphan_filter_keeps_offscreen_reactions(self):
+        from scripts.video_trimmer import _prune_orphan_units
+
+        units = [
+            {"transcript": "好", "t_first": 0.0, "t_last": 0.4, "role": "host"},
+            {"transcript": "對", "t_first": 1.0, "t_last": 1.3, "role": "offscreen"},
+            {"transcript": "今天要介紹的是", "t_first": 2.0, "t_last": 3.5, "role": "host"},
+        ]
+        kept = _prune_orphan_units(units)
+        assert [u["transcript"] for u in kept] == ["對", "今天要介紹的是"]
+
+
 if __name__ == "__main__":
     unittest.main()

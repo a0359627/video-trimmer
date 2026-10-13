@@ -259,6 +259,24 @@ class TestAlignClipWithWhisper(unittest.TestCase):
         assert coalesced[0]["t_last"] == pytest.approx(47.10, abs=0.02)
         assert coalesced[1]["t_first"] == pytest.approx(47.25, abs=0.02)
 
+    def test_tc05b_continuous_tail_is_kept_when_it_does_not_overlap_next_sentence(self):
+        """連續發音保護（conform）：LLM 漏寫句尾、尾詞與前一詞無停頓且不與下一句重疊時，句尾不可被裁掉。
+
+        與 TC-05 的差別只在尾詞是否跑進下一句的時間範圍；TC-05 的尾詞與 Sentence 7 重疊，
+        代表 Whisper 把下一句重講的音訊轉寫了兩次，裁掉不會損失任何獨有語音。
+        """
+        words_s9 = [
+            {"word": "叫做八坂會館的老", "start": 10.00, "end": 12.00},
+            {"word": "建", "start": 12.05, "end": 12.30},
+            {"word": "築", "start": 12.32, "end": 12.60},
+        ]
+        s9 = _sentence(9, 10.00, 12.60, "叫做八坂會館的老建築", words_s9)
+        s10 = _sentence(10, 13.40, 15.00, "它已經有一百年歷史", _words_for("它已經有一百年歷史", 13.40, 1.6))
+        clip = {"sentence_ids": [9], "transcript": "叫做八坂會館的老", "topic": "Clip 9"}
+
+        su = resolve_clip_sub_units([s9, s10], clip, total_dur=20.0)
+        assert su[0]["t_last"] == pytest.approx(12.60, abs=0.02)
+
     def test_intra_sentence_repeat_trims_to_rightmost_repetition_and_keeps_gemini_transcript(self):
         """Verify A + A + B intra-sentence repeat trims to the second A + B and preserves Gemini's corrected transcript."""
         words = [

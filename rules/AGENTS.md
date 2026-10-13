@@ -15,7 +15,7 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
   - Show the exact error message and exit status to the user.
   - Give a clear, actionable solution to the user (for example, run `./setup.sh --project YOUR_PROJECT_ID`, run `gcloud auth application-default login`, or install FFmpeg).
   - Do NOT try to modify the script, probe different code paths, or rewrite logic.
-- Verify all required deliverable files (`_trimmed.mp4`, `_edl.fcpxml`, `_edl.xml`, `_edl.json`, `_edl.csv`, `_edl_report.md`, `_edl_report.json`, `_whisper_raw.json`) exist in the output directory (`<input_dir>/output/` by default) and are non-empty (`> 0 bytes`) before declaring task completion.
+- Verify all required deliverable files (`_trimmed.mp4` unless `--xml-only` / `--no-render`, `_edl.fcpxml`, `_edl.xml`, `_edl.json`, `_edl.csv`, `_edl_report.md`, `_edl_report.json`, `_edl_summary.md`, `_whisper_raw.json`) exist in the output directory (`<input_dir>/output/` by default) and are non-empty (`> 0 bytes`) before declaring task completion.
 - Inspect the top-level `agent_verdict` object in `<BASENAME>_<TAG>_edl_report.json`:
   - If `agent_verdict.pass_quality_gate` is `true` (`suggested_action == "DELIVER"`), deliver the final trimmed MP4, NLE timelines, and audit summary to the user.
   - **One-Shot Self-Healing Protocol (Max 1 Retry)**: If `agent_verdict.pass_quality_gate` is `false` (`suggested_action == "ONE_SHOT_REMEDIATE"`, or exit code `2` when `--strict` is enabled), you may execute **at most ONE** automated remediation re-run (`remediation_cmd`). If the second run still reports `pass_quality_gate: false`, stop immediately, report the `[Degraded]` status and `fatal_violations` to the user, and do NOT enter an infinite retry loop.
@@ -29,7 +29,7 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Execute the workflow defined in `skills/video-trimmer/SKILL.md`.
 - Pass `-s <SCRIPT_FILE>` whenever the user provides a reference shooting script or outline to activate Mode A (Monotonic Script-Anchored Alignment); omit `-s` for unscripted recordings to activate Mode B (Unscripted Intent-Window Arbitration).
 - All cut points and keep-ranges must respect the Whisper word-level acoustic ground truth (`word_timestamps=True`), onset snapping, and `Sentence ID` boundaries.
-- Do NOT truncate speech phonemes or spoken words. Maintain dynamic speech padding and 15ms equal-power audio micro-crossfades (`iqsin`/`qsin`) to eliminate audio pop artifacts.
+- Do NOT truncate speech phonemes or spoken words. Maintain dynamic speech padding and equal-power audio micro-crossfades (`iqsin`/`qsin`, length `CROSSFADE_DURATION_SEC` = 20 ms) to eliminate audio pop artifacts.
 
 ## 5. Default Static Multimodal Execution
 - Run `video_trimmer.py` in `<PLUGIN_ROOT>` in default Static Multimodal mode (`MEDIA_RESOLUTION_LOW`) for fast, timeout-free inference.
@@ -40,4 +40,10 @@ When you execute tasks or skills from this plugin, you MUST follow these operati
 - Run `--transcribe-only` first and show the user the `[HOST]` / `[OFFSCREEN]` / `[CUE]` sentence list before any cloud inference.
 - Keep retained off-screen lines as separate `offscreen` clips. Never hand-edit the Whisper cache except to replace a verified hallucinated span, and say so in the report.
 - Prefer `--analysis-video <1080p proxy>` for 4K sources; the XML must still reference the original file passed to `-i`.
-- `--xml-only` when the user only needs the NLE timeline.
+- `--xml-only` (or `--no-render`) when the user only needs the NLE timeline.
+
+## 7. DaVinci Resolve Conform & Phoneme Protection Invariants
+- Pass `--xml-profile davinci` when the user imports the FCP7 XML into DaVinci Resolve. The default `--xml-profile premiere` keeps the Premiere Pro structure.
+- All generated FCP7 XMLs (both profiles) must keep clipitem IDs and file IDs globally unique and disjoint. The `davinci` profile uses the ID namespaces `file_id = f"{video_name}_master"`, `clipitem id = f"{video_name}_v{idx}"`, `f"{video_name}_a{idx}"` to prevent circular DOM references and missing video tracks in DaVinci Resolve.
+- In the `davinci` profile, source camera timecode (`start_tc`) must be preserved in XML `<file><timecode><string>` without `<frame>` tags to prevent freeze-frame artifacts.
+- Word trimming must strictly observe continuous phonation (`tail_gap < 0.18s` must never be trimmed) and blooper whitelisting to eliminate truncated phonemes at cut boundaries.

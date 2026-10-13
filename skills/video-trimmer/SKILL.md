@@ -1,6 +1,6 @@
 ---
 name: video-trimmer
-description: AI-Powered Smart Video Trimmer and rough-cut engine adhering to Agent Skills Specification. Features Gemini 3.8 Flash Multimodal Video Understanding (native video, no hallucinated cuts, last-take-wins), Whisper Word-Level Acoustic Ground Truth (Apple Silicon Metal GPU via mlx-whisper), Acoustic Onset Snapping (Smart Gap Shortening), 15ms Audio Equal-Power Micro-Crossfade, and multi-format NLE Project Export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).
+description: AI-Powered Smart Video Trimmer and rough-cut engine adhering to Agent Skills Specification. Features Gemini 3.8 Flash Multimodal Video Understanding (native video, no hallucinated cuts, last-take-wins), Whisper Word-Level Acoustic Ground Truth (Apple Silicon Metal GPU via mlx-whisper), Acoustic Onset Snapping (Smart Gap Shortening), 20ms Audio Equal-Power Micro-Crossfade, and multi-format NLE Project Export (Premiere Pro XML, DaVinci Resolve XML, Final Cut Pro FCPXML).
 metadata:
   version: "1.0.0"
   author: "sylphlin"
@@ -13,7 +13,7 @@ metadata:
 
 AI-Powered Smart Video Trimmer and rough-cut engine adhering to the open [Agent Skills Specification](https://agentskills.io/specification).
 
-Tailored for talking-head videos, tech explainers, video podcasts, tutorials, and multi-take raw footage. Combines **Gemini 3.8 Flash Multimodal Video Understanding** with local **Whisper Word-Level Acoustic Ground Truth** (with Apple Silicon Metal GPU acceleration via `mlx-whisper`), **Acoustic Onset Snapping (Smart Gap Shortening)**, and **15ms Audio Equal-Power Micro-Crossfades**.
+Tailored for talking-head videos, tech explainers, video podcasts, tutorials, and multi-take raw footage. Combines **Gemini 3.8 Flash Multimodal Video Understanding** with local **Whisper Word-Level Acoustic Ground Truth** (with Apple Silicon Metal GPU acceleration via `mlx-whisper`), **Acoustic Onset Snapping (Smart Gap Shortening)**, and **20ms Audio Equal-Power Micro-Crossfades**.
 
 ---
 
@@ -68,21 +68,24 @@ video-trimmer/
    - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "CTA-S2", "CDA84") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
 4. **Word-Level Acoustic Ground Truth & Global Cross-Clip Coalescing**:
    - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps segmented purely on physical breath pauses and punctuation closure.
-   - Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`) automatically merges consecutive `Sentence ID`s across adjacent clips when `gap < 0.40s`, eliminating artificial internal jump-cuts.
+   - Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`) automatically merges consecutive `Sentence ID`s across adjacent clips when `gap < 0.65s` (default; Show Mode `--keep-pause-sec` overrides it), eliminating artificial internal jump-cuts.
 5. **Acoustic Onset Snapping (Smart Gap Shortening)**:
    - Scans the pre-speech dead air to snap cut-ins precisely **80ms before vocal cord vibration**, eliminating awkward pre-speech dead air and post-slate pauses.
-6. **Word Ground Truth Tail & Plosive Defense**:
+6. **Word Ground Truth Tail & Continuous Phonation Protection**:
    - Strictly enforces `true_speech_end >= t_last` with forward-only tracking down to ambient room noise.
+   - Continuous Phonation Invariant: When `tail_gap < 0.18s` (speaker in continuous speech flow), trailing words are never trimmed even if omitted from the prompt transcript, completely preserving trailing phonemes and words. Only explicit blooper tokens from the managed whitelist are pruned, or tail words that Whisper duplicated into the time range of the next sentence.
    - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` in words like「台」) and soft trailing nasal vowels without clipping word endings.
-7. **15ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
-   - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and 15ms `afade` equal-power micro-fades (`iqsin`/`qsin`) across all cut boundaries.
+7. **20ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
+   - FFmpeg rendering uses per-clip fast keyframe input seeking (`-ss`/`-to` before `-i`), Apple Silicon `VideoToolbox` hardware decoding/encoding (`-hwaccel videotoolbox` + `h264_videotoolbox` with `libx264` fallback), a 1-second GOP (`-g 30`), and `afade` equal-power micro-fades (`iqsin`/`qsin`, length `CROSSFADE_DURATION_SEC` = 20ms in `constants.py`) across all cut boundaries.
 8. **Production Script Injection (`--script`)**:
    - Ingests production shooting scripts (`.md` / `.txt`) to guide section-by-section matching and prevent skipping intended talking points.
 9. **Pre-Render Surgical Micro-Window Repair & 8-Dimension Quality Audit (`edl_auditor.py`)**:
    - Before FFmpeg rendering, detects missing script blocks (Mode A), unanchored clips, or adjacent retake candidates and re-scans only the affected `15s–90s` video slice via Vertex AI `VideoMetadata(start_offset=..., end_offset=...)`, avoiding full-video gateway timeouts.
    - Deterministically sanitizes boundary overlaps, enforces `source_out >= t_last`, merges `< 0.45s` flash-frame micro-clips, and outputs `<base>_<tag>_edl_report.md` and `<base>_<tag>_edl_report.json` with a top-level `agent_verdict`.
-10. **Universal NLE Project Export**:
-   - Generates industry-standard **FCP 7 XML** (Adobe Premiere Pro & DaVinci Resolve) and **FCPXML** (Final Cut Pro X), alongside direct high-quality **MP4** renders.
+10. **Universal NLE Project Export & DaVinci Resolve Conform**:
+   - Generates industry-standard **FCP 7 XML** (Adobe Premiere Pro & DaVinci Resolve, direct `<sequence>` nesting), **FCPXML** (Final Cut Pro X), **EDL CSV**, the Markdown clip summary (`_edl_summary.md`), and direct high-quality **MP4** renders.
+   - `--xml-profile premiere` (default) writes the Premiere Pro structure (`xmeml v4`, per-channel audio tracks, clip links, sequence markers).
+   - `--xml-profile davinci` writes the same structure for DaVinci Resolve: `xmeml v5`, collision-free XML ID namespaces (`file_id = f"{video_name}_master"`, `clipitem id = f"{video_name}_v{idx}"`, `f"{video_name}_a{idx}"`) to prevent media disconnection, and embedded camera timecode in `<file><timecode><string>` without `<frame>` tags to prevent freeze-frames.
 
 ---
 
@@ -154,6 +157,8 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--cached-json`| | `None` | Path to existing EDL JSON to bypass cloud Gemini inference. |
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
+| `--no-render` | | `False` | Skip the MP4 render (same as `--xml-only`). |
+| `--xml-profile` | | `premiere` | FCP7 XML flavour: `premiere` (Premiere Pro structure) or `davinci` (same structure, `xmeml v5`, camera timecode in `<file><timecode>` without `<frame>`). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
 | `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
@@ -165,6 +170,8 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--allow-reorder` | | `False` | Keep `timeline_position` order; out-of-order clips become a warning instead of a fatal violation. |
 | `--xml-only` | | `False` | Skip the MP4 render; still writes JSON, CSV, XML, FCPXML and the audit report. |
 | `--repeats-as-warnings` | | `False` | Show Mode: intra-clip repeated clauses (rhetorical "A, 還是 A", doubled phrases) are warnings instead of a fatal violation. |
+| `--keep-pause-sec` | | `None` | Show Mode: keep pauses inside a thought up to N seconds (one clip). Omitted = default tuning (sentence gap `0.65s`, word gap `0.70s`). Show recordings: `1.0`. |
+| `--tail-pad-sec` | | `0.0` | Show Mode: extra time after the last word of each clip; never crosses the next sentence onset. Show recordings: `0.25`. |
 | `--transcribe-only` | | `False` | Stop after Whisper transcription and sentence merging (with role tags); no upload, no Gemini call. |
 
 ### Show Mode (host + off-screen voice role on a second microphone)
@@ -188,14 +195,15 @@ Role rules live in `prompts/video_cut_prompt_show.md`: off-screen lines that mat
 ## Output Deliverables
 
 For an input file `raw_footage.mp4`, the skill isolates all generated files inside `<input_dir>/output/` (or the directory specified via `-o`):
-1. `output/raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 15ms micro-fades.
-2. `output/raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** & **DaVinci Resolve**.
+1. `output/raw_footage_<suffix>_trimmed.mp4`: High-bitrate assembled video cut with 20ms micro-fades (skipped with `--xml-only` / `--no-render`).
+2. `output/raw_footage_<suffix>_edl.xml`: Final Cut Pro 7 XML timeline for **Premiere Pro** (`--xml-profile premiere`, default) or **DaVinci Resolve** (`--xml-profile davinci`).
 3. `output/raw_footage_<suffix>_edl.fcpxml`: FCPXML timeline for **Final Cut Pro X**.
 4. `output/raw_footage_<suffix>_edl.json`: Structured decision metadata with `agent_verdict`, per-clip CPS, and margins.
 5. `output/raw_footage_<suffix>_edl.csv`: Spreadsheet table with visual/audio validation notes.
 6. `output/raw_footage_<suffix>_edl_report.md`: 8-dimension human-readable rough-cut quality audit report.
 7. `output/raw_footage_<suffix>_edl_report.json`: Machine-readable audit report with top-level `agent_verdict`.
-8. `output/raw_footage_whisper_raw.json`: Word-level semantic sentence transcript cache.
+8. `output/raw_footage_<suffix>_edl_summary.md`: Markdown clip summary table (source in/out, duration, CPS, transcript excerpt).
+9. `output/raw_footage_whisper_raw.json`: Word-level semantic sentence transcript cache.
 
 ---
 
