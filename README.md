@@ -119,13 +119,19 @@ video-trimmer/
 │       │   ├── exceptions.py                # Exception hierarchy
 │       │   ├── acoustic.py                  # CPS calculation, onset snapping, and tail margins
 │       │   ├── transcribe.py                # Acoustic clause segmentation, word trimming, and coalescing
+│       │   ├── roles.py                     # Show Mode: two-microphone HOST / OFFSCREEN / CUE role attribution
 │       │   ├── edl_auditor.py               # Surgical micro-window repair, timing sanitizer, and 8-D audit
 │       │   ├── gemini_client.py             # Vertex AI (ADC) client and dual-mode prompt builder
+│       │   ├── assembly.py                  # Show Mode: text-only global assembly, chunk reuse, sentence signature
 │       │   ├── gcs_utils.py                 # Cloud Storage staging, Google Drive cache, and CJK recovery
 │       │   ├── exporters.py                 # FCP7 XML, FCPXML, and CSV timeline exporters
-│       │   └── render.py                    # ffprobe inspection and FFmpeg micro-crossfade rendering
+│       │   ├── render.py                    # ffprobe inspection and FFmpeg micro-crossfade rendering
+│       │   └── cut_review.py                # Separate CLI: cut read-through review (re-transcribe, weak seams, XML markers)
 │       └── prompts/                         # Canonical prompt specifications (SSOT)
-│           └── video_cut_prompt.md          # Dual-mode take arbitration & 5-rule subtraction prompt
+│           ├── video_cut_prompt.md          # Dual-mode take arbitration & 5-rule subtraction prompt (default)
+│           ├── video_cut_prompt_show.md     # Show Mode master prompt (host + off-screen voice role)
+│           ├── assembly_prompt.md           # Show Mode global assembly prompt (--assemble)
+│           └── cut_review_prompt.md         # Cut read-through review prompt (cut_review.py)
 ├── AGENTS.md                                # Workspace & engineering development rules (Part I & Part II)
 ├── README.md                                # English documentation
 ├── LICENSE                                  # MIT License
@@ -133,7 +139,7 @@ video-trimmer/
 ├── setup.sh                                 # Native gcloud provisioning script (Zero Terraform)
 ├── pyproject.toml                           # PEP 621 Python package configuration
 ├── requirements.txt                         # Python dependencies
-└── tests/                                   # Offline unit test suite (103 tests)
+└── tests/                                   # Offline unit test suite (no cloud calls)
 ```
 
 ---
@@ -251,15 +257,18 @@ Use Show Mode when the director performs the script's voice role (questions, rea
 | Flag | Description |
 | :--- | :--- |
 | `--offscreen-channel auto\|left\|right` | Mic channel of the off-screen voice. Sentences are tagged `[HOST]` / `[OFFSCREEN]` / `[CUE]` and split at role changes. Countdown cues are always dropped; off-screen lines are kept or dropped by the model. |
-| `--prompt prompts/video_cut_prompt_show.md` | Show master prompt: off-screen lines matching the script's voice role, or answered by the host, become separate `offscreen` clips (XML names prefixed `[場外]`); fed lines, directions and chatter are dropped. |
-| `--reference-script` | Mode C: the script is structural reference only, without Mode A monotonic consumption or the coverage gate, so on-topic improvisation survives. |
+| `--prompt skills/video-trimmer/prompts/video_cut_prompt_show.md` | Show master prompt: off-screen lines matching the script's voice role, or answered by the host, become separate `offscreen` clips (XML names prefixed `[場外]`); fed lines, directions and chatter are dropped. A relative path is tried against the working directory, the skill folder (`skills/video-trimmer`, so `prompts/video_cut_prompt_show.md` also works) and the plugin root. A missing file stops the run (exit 1); it never falls back to the default prompt. |
+| `--reference-script` | Mode C: the script is structural reference only, without Mode A monotonic consumption or the coverage gate, so on-topic improvisation survives. A missing file stops the run. |
 | `--assemble` | Text-only global assembly pass after chunk inference: cross-chunk take arbitration, segment labels, timeline order. |
-| `--reuse-chunks` | With `--assemble`: reuse existing chunk results (`<stem>_<suffix>_chunk*_raw.txt`) and rerun only the assembly; no upload, no chunk inference. |
-|  | If the assembly output is truncated or invalid it retries once with the compact format, then degrades to the chunk results in source order (unique `timeline_position`), flagged in the report. Raw output: `<stem>_<suffix>_assembly_raw.txt`, `_assembly_meta.json`. |
+|  | If the assembly output is truncated or invalid it retries once with the minimal format, then degrades to the chunk results in source order (unique `timeline_position`), flagged in the report. Raw output: `<stem>_<suffix>_assembly_raw.txt` (retry: `_assembly_raw_retry.txt`), `_assembly_meta.json`. |
+| `--reuse-chunks` | Reuse saved chunk results (`<stem>_<suffix>_chunks_raw.json`, `_chunk1_raw.txt`, or a folder with one set); no upload, no chunk inference. With `--assemble`, only the assembly runs again. |
+|  | Sentence ID check (stops on mismatch): the run compares its sentences with `<stem>_<suffix>_chunks_sig.json`, written together with the chunk results (hash of sentence id / start / end / role, and the transcription settings). Older results without it are compared with `<stem>_whisper_sentences.json` read before transcription. Use the same `_whisper_raw.json` and the same `--offscreen-channel` / `--whisper-model`. |
 | `--allow-reorder` | Keep the assembled order; out-of-order clips become a warning. |
 | `--analysis-video` | Upload and analyse a proxy (e.g. 1080p) while Whisper, acoustic locking and XML use the original. |
 | `--xml-only` | Skip the MP4 render. |
 | `--repeats-as-warnings` | Intra-clip repeated clauses (rhetorical parallels, doubled phrases) become warnings instead of a fatal violation. |
+| `--keep-pause-sec` | Keep pauses inside a thought up to N seconds (one clip). Omitted = default tuning (sentence gap `0.65` s, word gap `0.70` s). Show recordings: `1.0`. |
+| `--tail-pad-sec` | Extra time after the last word of each clip; never enters the next sound (acoustic onset on every microphone). Default `0`; show recordings: `0.25`. |
 | `--transcribe-only` | Transcription and role tagging only, to inspect the footage first. |
 
 ```bash
@@ -277,8 +286,10 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 2. **`output/raw_footage_<tag>_edl.xml`**: Final Cut Pro 7 XML timeline for **Adobe Premiere Pro** (`--xml-profile premiere`, default) or **DaVinci Resolve** (`--xml-profile davinci`).
 3. **`output/raw_footage_<tag>_edl.fcpxml`**: Apple FCPXML timeline for **Final Cut Pro**.
 4. **`output/raw_footage_<tag>_edl.json`** & **`_edl.csv`**: Structured decision metadata and spreadsheet cut table with editorial notes.
-5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with top-level `agent_verdict`.
-6. **`output/raw_footage_whisper_raw.json`**: Cached Whisper word-level transcript.
+5. **`output/raw_footage_<tag>_edl_report.md`** & **`_edl_report.json`**: 8-dimension rough-cut quality audit report with top-level `agent_verdict`. When the gate fails, `remediation_cmd` repeats every option of the run (`-o`, `--suffix`, Show Mode flags, `--keep-pause-sec`, `--tail-pad-sec`, ...; absolute paths), so the remediation run writes to the same folder and reuses the Whisper cache.
+6. **`output/raw_footage_<tag>_edl_summary.md`**: Markdown clip summary table.
+7. **`output/raw_footage_whisper_raw.json`** / **`_whisper_meta.json`** / **`_whisper_sentences.json`**: Cached Whisper word-level transcript, its model record, and the `Sentence ID` list of the run (with role tags; written again by each run).
+8. Show Mode audit files: `output/raw_footage_<tag>_chunk<N>_raw.txt`, `_chunks_raw.json`, `_chunks_sig.json` (sentence signature), `_assembly_raw.txt`, `_assembly_meta.json`, `usage_log.jsonl`.
 
 ---
 
@@ -293,7 +304,7 @@ For an input video `raw_footage.mp4`, the agent automatically creates an `output
 
 ## Unit Testing
 
-Run the offline test suite (103 tests) before committing changes:
+Run the offline test suite before committing changes:
 
 ```bash
 python3 -m unittest discover -s tests -v

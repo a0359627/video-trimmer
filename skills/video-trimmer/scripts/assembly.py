@@ -22,10 +22,12 @@ Output size control:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import re
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .exceptions import GeminiAPIError, InvalidInputError
@@ -712,6 +714,84 @@ def load_chunk_results(path: Path) -> tuple[list[dict], list[Path]]:
     if not files:
         raise InvalidInputError(f"找不到 {prefix}1_raw.txt")
     return [parse_edl_json_text(f.read_text(encoding="utf-8")) for f in files], files
+
+
+# Sentence signature of a chunk result set (`--reuse-chunks` safety check).
+# Chunk and assembly results refer to sentences by ID only. The signature is written next to the
+# chunk results when they are made, so that a later run can compare its own sentences with it.
+# The `<stem>_whisper_sentences.json` file next to the chunk results is not a safe reference:
+# each run writes it again during transcription, often in the same folder.
+CHUNK_SIGNATURE_SUFFIX = "_chunks_sig.json"
+SIGNATURE_FORMAT = "video-trimmer/sentence-signature"
+SIGNATURE_VERSION = 1
+SIGNATURE_FIELDS = ("id", "start", "end", "speaker_id")
+SIG_SOURCE_INFERENCE = "chunk_inference"  # written by the run that made the chunk results
+SIG_SOURCE_REUSE_CHECKED = "reuse_checked"  # copied by a reuse run after a successful check
+SIG_SOURCE_REUSE_UNCHECKED = "reuse_unchecked"  # reuse run without a reference: not verified
+SIG_SOURCE_LEGACY_FILE = "legacy_sentences_file"  # older results: sentences file read before transcription
+
+_CHUNKS_JSON_RE = re.compile(r"^(?P<stem>.+)_chunks_raw\.json$", re.IGNORECASE)
+
+
+def sentence_signature(units: list[dict]) -> dict:
+    """Return the identity of a Sentence ID list: the count and a SHA-256 of (id, start, end, speaker_id).
+
+    Two sentence lists with the same signature map each Sentence ID to the same audio and mic role.
+    Times are rounded to 0.01 s. A missing speaker_id counts as "SPEAKER_00" (the merge default).
+    """
+    rows = [
+        [int(u.get("id", -1)), round(float(u.get("start", 0.0)), 2), round(float(u.get("end", 0.0)), 2),
+         str(u.get("speaker_id") or "SPEAKER_00")]
+        for u in (units or []) if isinstance(u, dict)
+    ]
+    blob = json.dumps(rows, ensure_ascii=False, separators=(",", ":"))
+    return {"sentence_count": len(rows), "sentence_sha256": hashlib.sha256(blob.encode("utf-8")).hexdigest()}
+
+
+def chunk_signature_path(chunk_file: Path) -> Path:
+    """Return the signature file of a chunk result set.
+
+    `<base>_<tag>_chunk<N>_raw.txt` and `<base>_<tag>_chunks_raw.json` share `<base>_<tag>_chunks_sig.json`.
+    Any other JSON file `<name>.json` uses `<name>_chunks_sig.json`.
+    """
+    p = Path(chunk_file)
+    m = _CHUNK_RAW_RE.match(p.name)
+    if m:
+        stem = m.group("prefix")[: -len("_chunk")]
+    else:
+        mj = _CHUNKS_JSON_RE.match(p.name)
+        stem = mj.group("stem") if mj else p.stem
+    return p.parent / f"{stem}{CHUNK_SIGNATURE_SUFFIX}"
+
+
+def write_chunk_signature(path: Path, units: list[dict], transcription: dict, source: str, video_name: str) -> Path:
+    """Write the sentence signature and the transcription settings of a chunk result set."""
+    doc = {
+        "format": SIGNATURE_FORMAT,
+        "version": SIGNATURE_VERSION,
+        "source": source,
+        "video": video_name,
+        "fields": list(SIGNATURE_FIELDS),
+        **sentence_signature(units),
+        "transcription": dict(transcription or {}),
+        "written_at": datetime.now(timezone.utc).isoformat(),
+    }
+    path = Path(path)
+    path.write_text(json.dumps(doc, ensure_ascii=False, indent=2), encoding="utf-8")
+    return path
+
+
+def read_chunk_signature(path: Path) -> dict:
+    """Read a signature file written by write_chunk_signature. A damaged file is an error (fail closed)."""
+    path = Path(path)
+    try:
+        doc = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise InvalidInputError(f"無法讀取句子簽章 {path}: {e}") from e
+    if (not isinstance(doc, dict) or doc.get("format") != SIGNATURE_FORMAT
+            or not isinstance(doc.get("sentence_sha256"), str) or "sentence_count" not in doc):
+        raise InvalidInputError(f"句子簽章格式不對（需要 {SIGNATURE_FORMAT}）: {path}")
+    return doc
 
 
 def find_unaccounted_sentences(

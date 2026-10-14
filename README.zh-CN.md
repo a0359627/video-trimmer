@@ -194,15 +194,18 @@ chmod +x setup.sh
 | 旗标 | 说明 |
 | :--- | :--- |
 | `--offscreen-channel auto\|left\|right` | 画外麦克风所在声道；每句标成 `[HOST]`／`[OFFSCREEN]`／`[CUE]` 并在角色切换处拆句。倒数口令永远剔除，画外台词由模型依规则判定。 |
-| `--prompt prompts/video_cut_prompt_show.md` | 节目型主提示词：对得上脚本声音角色、或主持人接着回应的画外提问／反应保留为独立 `offscreen` clip（XML 名称前缀 `[場外]`）；喂词、流程指令、闲聊剔除。 |
-| `--reference-script` | Mode C：脚本只作结构参考，不做 Mode A 的单向消耗与覆盖率闸门。 |
+| `--prompt skills/video-trimmer/prompts/video_cut_prompt_show.md` | 节目型主提示词：对得上脚本声音角色、或主持人接着回应的画外提问／反应保留为独立 `offscreen` clip（XML 名称前缀 `[場外]`）；喂词、流程指令、闲聊剔除。相对路径依次对照当前目录、skill 目录（`skills/video-trimmer`，所以写 `prompts/video_cut_prompt_show.md` 也可以）与 plugin 根目录；文件找不到就中止（exit 1），不会改用默认提示词。 |
+| `--reference-script` | Mode C：脚本只作结构参考，不做 Mode A 的单向消耗与覆盖率闸门。文件找不到就中止。 |
 | `--assemble` | 分段推理后再做一次纯文本全片组装：跨区段取舍、段落标签、成片顺序。 |
-| `--reuse-chunks` | 搭配 `--assemble`：沿用已有的区段结果（`<stem>_<suffix>_chunk*_raw.txt`），只重跑全片组装；不上传、不重做区段推理。 |
-|  | 组装输出被截断或格式错误时，先用精简格式重试一次；仍失败就降级为各区段结果（按原片顺序、`timeline_position` 全片唯一），并在报告标明。原始输出：`<stem>_<suffix>_assembly_raw.txt`、`_assembly_meta.json`。 |
+|  | 组装输出被截断或格式错误时，先用精简格式重试一次；仍失败就降级为各区段结果（按原片顺序、`timeline_position` 全片唯一），并在报告标明。原始输出：`<stem>_<suffix>_assembly_raw.txt`（重试：`_assembly_raw_retry.txt`）、`_assembly_meta.json`。 |
+| `--reuse-chunks` | 沿用已有的区段结果（`<stem>_<suffix>_chunks_raw.json`、`_chunk1_raw.txt` 或只含一组结果的文件夹），不上传、不重做区段推理；搭配 `--assemble` 只重跑全片组装。 |
+|  | 句子编号核对（不一致就中止）：比对区段结果旁的 `<stem>_<suffix>_chunks_sig.json`（生成区段结果时一并写出，记录句子 id／起止／角色的哈希与转录设置）。没有签名的旧结果，改用转录之前读到的 `<stem>_whisper_sentences.json`。请沿用同一份 `_whisper_raw.json` 与相同的 `--offscreen-channel`／`--whisper-model`。 |
 | `--allow-reorder` | 允许成片顺序与原片不同；顺序颠倒改为警告。 |
 | `--analysis-video` | 上传与分析用代理文件（如 1080p），Whisper、声学锁定与 XML 仍以原文件为准。 |
 | `--xml-only` | 不渲染 MP4。 |
 | `--repeats-as-warnings` | 句内重复字句（排比、刻意重复）改列为警告而非 fatal。 |
+| `--keep-pause-sec` | 想法内部可保留的停顿上限（秒），小于此值的停顿不切开、连续句子合并成一个 clip。未指定时沿用默认调校（句间 `0.65` 秒／字间 `0.70` 秒）；节目型建议 `1.0`。 |
+| `--tail-pad-sec` | 每个 clip 尾字之后多留的时间（秒），让想法落地；不会跨进下一段声音（以每支麦克风的声学起音为准）。默认 `0`；节目型建议 `0.25`。 |
 | `--transcribe-only` | 只做转录与角色标记。 |
 
 ```bash

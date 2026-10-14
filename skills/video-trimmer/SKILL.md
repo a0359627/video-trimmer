@@ -36,12 +36,19 @@ video-trimmer/
 │       │   ├── exceptions.py         # Custom exception hierarchy
 │       │   ├── acoustic.py           # CPS calculation & text-locked acoustic bounds
 │       │   ├── transcribe.py         # Whisper transcription, clause segmentation, cross-clip coalescing
+│       │   ├── roles.py              # Show Mode: two-microphone HOST / OFFSCREEN / CUE role attribution
 │       │   ├── gemini_client.py      # Vertex AI (ADC) client & multimodal inference
+│       │   ├── assembly.py           # Show Mode: text-only global assembly, chunk reuse & sentence signature
+│       │   ├── edl_auditor.py        # Micro-window repair, timeline sanitizer & 8-dimension audit
 │       │   ├── gcs_utils.py          # Google Cloud Storage upload & ephemeral cleanup
 │       │   ├── exporters.py          # FCP7 XML / FCPXML / CSV generation
-│       │   └── render.py             # ffprobe inspection & ffmpeg final render
+│       │   ├── render.py             # ffprobe inspection & ffmpeg final render
+│       │   └── cut_review.py         # Separate CLI: cut read-through review (re-transcribe the cut, flag weak seams, XML markers)
 │       └── prompts/                  # Canonical multimodal prompting specifications (SSOT)
-│           └── video_cut_prompt.md   # Dual-mode take arbitration & 5-rule subtraction prompt
+│           ├── video_cut_prompt.md   # Dual-mode take arbitration & 5-rule subtraction prompt (default)
+│           ├── video_cut_prompt_show.md # Show Mode master prompt (host + off-screen voice role)
+│           ├── assembly_prompt.md    # Show Mode global assembly prompt (`--assemble`)
+│           └── cut_review_prompt.md  # Cut read-through review prompt (cut_review.py)
 ├── AGENTS.md                         # Workspace & engineering development rules (ASD-STE100 English)
 ├── README.md                         # Public GitHub README documentation
 ├── LICENSE                           # MIT License
@@ -133,7 +140,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 ### Step 3: Deliverable Verification, `agent_verdict` Quality Gate, & Cached Local Iteration
 Verify that all required deliverables exist in `<input_dir>/output/` and inspect `agent_verdict` in `<base>_<tag>_edl_report.json`:
 - If `agent_verdict.pass_quality_gate == true` (`suggested_action == "DELIVER"`), deliver the outputs to the user.
-- If `agent_verdict.pass_quality_gate == false` (`suggested_action == "ONE_SHOT_REMEDIATE"`, or exit code `2` when `--strict` is enabled), execute at most **1** remediation run using `remediation_cmd`.
+- If `agent_verdict.pass_quality_gate == false` (`suggested_action == "ONE_SHOT_REMEDIATE"`, or exit code `2` when `--strict` is enabled), execute at most **1** remediation run using `remediation_cmd`. Run it with `Cwd` = `<PLUGIN_ROOT>`. It repeats every option of the failed run (`-o`, `--suffix`, Show Mode flags, `--keep-pause-sec`, `--tail-pad-sec`, `--whisper-model`, ...) with absolute, shell-quoted paths, so it writes to the same output folder, reuses the Whisper cache and keeps the same cut rules.
 
 To adjust pacing, fine-tune margins, or re-render locally without re-incurring cloud API inference:
 ```bash
@@ -149,15 +156,15 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--input` | `-i` | *(Required)* | Path to input raw video file (`.mp4`, `.mov`) or Google Drive link. |
 | `--output-dir` | `-o` | `<input_dir>/output/` | Directory to save all generated output files (`./output/` for Google Drive links). |
 | `--model` | `-m` | `gemini-3.8-flash` | Gemini model name (defaults to `$MODEL_NAME` or `gemini-3.8-flash`). |
-| `--project` | | `None` | Google Cloud Project ID (defaults to `$GOOGLE_CLOUD_PROJECT` or ADC). |
-| `--region` | | `None` | Vertex AI location/region (defaults to `$GOOGLE_CLOUD_LOCATION` or `global`). |
+| `--project` | | `None` | Google Cloud Project ID (defaults to `$GOOGLE_CLOUD_PROJECT` / `$GCP_PROJECT` or ADC). |
+| `--region` | | `None` | Vertex AI location/region (defaults to `$GOOGLE_CLOUD_LOCATION` / `$GCP_REGION` or `global`). |
 | `--bucket` | | `None` | GCS bucket for video staging (defaults to `$VIDEO_TRIMMER_BUCKET`). |
 | `--keep-gcs-upload` | | `False` | Retain ephemeral staged video in GCS instead of deleting after inference. |
-| `--script` | `-s` | `None` | Path to production shooting script (`.md` / `.txt`). |
+| `--script` | `-s` | `None` | Path to production shooting script (`.md` / `.txt`). A given path that does not exist stops the run (exit `1`) before transcription. |
 | `--agentic` | | `False` | Enable Agentic Video Understanding dynamic exploration mode. |
-| `--pacing` | `-p` | `auto` | Pacing style: `auto` (adaptive CPS), `compact`, `breathing`. |
+| `--pacing` | `-p` | `auto` | Pacing style: `auto` (adaptive CPS; `dynamic` is the same), `compact`, `breathing`. |
 | `--cached-json`| | `None` | Path to existing EDL JSON to bypass cloud Gemini inference. |
-| `--suffix` | | `None` | Custom tag suffix for generated filenames. |
+| `--suffix` | | `None` | Custom tag suffix for generated filenames (defaults to `agentic` with `--agentic`, else `static`). |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
 | `--no-render` | | `False` | Skip the MP4 render (same as `--xml-only`). |
 | `--xml-profile` | | `premiere` | FCP7 XML flavour: `premiere` (Premiere Pro structure) or `davinci` (same structure, `xmeml v5`, camera timecode in `<file><timecode>` without `<frame>`). |
@@ -165,12 +172,12 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--whisper-model` | | `large-v3` | Whisper model (`small`, `medium`, `large-v3`, `large-v3-turbo`, or an mlx Hugging Face repo). Defaults to `$WHISPER_MODEL` or `large-v3`. An existing `_whisper_raw.json` in the output directory is reused as is. |
 | `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
-| `--prompt` | | `None` | Show Mode: alternative master prompt file (e.g. `prompts/video_cut_prompt_show.md`). |
-| `--reference-script` | | `None` | Show Mode (Mode C): script used only as structural reference; no Mode A monotonic consumption or coverage gate. |
+| `--prompt` | | `None` | Alternative master prompt file. Show Mode: `skills/video-trimmer/prompts/video_cut_prompt_show.md`. A relative path is tried against the working directory, then the skill folder (`skills/video-trimmer`, so `prompts/video_cut_prompt_show.md` also works), then `<PLUGIN_ROOT>`. A missing file stops the run (exit `1`); it never falls back to the default prompt. Omitted = `prompts/video_cut_prompt.md`. |
+| `--reference-script` | | `None` | Show Mode (Mode C): script used only as structural reference; no Mode A monotonic consumption or coverage gate. A given path that does not exist stops the run (exit `1`). |
 | `--offscreen-channel` | | `none` | Show Mode: `auto` / `left` / `right` mic channel of the off-screen voice; tags sentences `[HOST]` / `[OFFSCREEN]` / `[CUE]` and splits at role changes. |
 | `--analysis-video` | | `None` | Upload and analyse this proxy (e.g. 1080p) while Whisper, acoustic locking and XML use the `-i` original. |
-| `--assemble` | | `False` | Show Mode: text-only global assembly pass after chunk inference (cross-chunk take arbitration, segment labels, timeline order). |
-| `--reuse-chunks` | | `None` | With `--assemble`: reuse existing chunk results and rerun only the assembly (no upload, no chunk inference, no micro-window repair). The assembly output is compact (candidate ids, sentence ids, role, segment); fields are filled back locally. Truncated or invalid output → one compact retry → degrade to chunk results in source order with unique `timeline_position`, flagged in the report. Raw output and usage: `<stem>_<suffix>_assembly_raw.txt`, `_assembly_meta.json`, `usage_log.jsonl` (one line per assembly attempt). |
+| `--assemble` | | `False` | Show Mode: text-only global assembly pass after chunk inference (cross-chunk take arbitration, segment labels, timeline order). The assembly output is compact (candidate ids, sentence ids, role, segment); fields are filled back locally. Truncated or invalid output → one minimal-format retry → degrade to chunk results in source order with unique `timeline_position`, flagged in the report. Raw output and usage: `<stem>_<suffix>_assembly_raw.txt` (retry: `_assembly_raw_retry.txt`), `_assembly_meta.json`, `usage_log.jsonl` (one line per assembly attempt). |
+| `--reuse-chunks` | | `None` | Reuse saved chunk results (`*_chunks_raw.json`, `*_chunk1_raw.txt`, or a folder with one chunk set): no upload, no chunk inference, no micro-window repair. With `--assemble`, only the assembly runs again; without it, the chunk results are merged. Sentence ID check (fail closed): the run compares its sentences (id / start / end / role) with `<stem>_<suffix>_chunks_sig.json`, which is written together with the chunk results. Older results without it are compared with `<stem>_whisper_sentences.json` read before transcription (when the chunks are in the output folder, that reference is first saved as `_chunks_sig.json`). A mismatch stops the run (exit `1`): use the same `_whisper_raw.json` and transcription settings (`--offscreen-channel`, `--whisper-model`, `--skip-whisper`). |
 | `--allow-reorder` | | `False` | Keep `timeline_position` order; out-of-order clips become a warning instead of a fatal violation. |
 | `--xml-only` | | `False` | Skip the MP4 render; still writes JSON, CSV, XML, FCPXML and the audit report. |
 | `--repeats-as-warnings` | | `False` | Show Mode: intra-clip repeated clauses (rhetorical "A, 還是 A", doubled phrases) are warnings instead of a fatal violation. |
@@ -192,7 +199,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/raw.mp4" --analy
   --offscreen-channel auto --assemble --allow-reorder --xml-only --suffix show
 ```
 
-Role rules live in `prompts/video_cut_prompt_show.md`: off-screen lines that match the script's voice role, or that the host answers, are kept as separate `role: offscreen` clips (named `[場外] ...` in the XML); countdowns, fed lines, directions and chatter are dropped. Only `[CUE]` sentences are excluded from acoustic locking by the engine; every other decision is the model's and is auditable in `<base>_<tag>_assembly_raw.json` and `<base>_<tag>_chunks_raw.json`.
+Role rules live in `prompts/video_cut_prompt_show.md`: off-screen lines that match the script's voice role, or that the host answers, are kept as separate `role: offscreen` clips (named `[場外] ...` in the XML); countdowns, fed lines, directions and chatter are dropped. Only `[CUE]` sentences are excluded from acoustic locking by the engine; every other decision is the model's and is auditable in `<base>_<tag>_assembly_raw.txt` and `<base>_<tag>_chunks_raw.json`.
 
 ---
 
@@ -207,7 +214,16 @@ For an input file `raw_footage.mp4`, the skill isolates all generated files insi
 6. `output/raw_footage_<suffix>_edl_report.md`: 8-dimension human-readable rough-cut quality audit report.
 7. `output/raw_footage_<suffix>_edl_report.json`: Machine-readable audit report with top-level `agent_verdict`.
 8. `output/raw_footage_<suffix>_edl_summary.md`: Markdown clip summary table (source in/out, duration, CPS, transcript excerpt).
-9. `output/raw_footage_whisper_raw.json`: Word-level semantic sentence transcript cache.
+9. `output/raw_footage_whisper_raw.json`: Raw Whisper word-timestamp cache (reused by later runs in the same output folder).
+10. `output/raw_footage_whisper_meta.json`: Whisper model, backend and transcription time of the cache.
+11. `output/raw_footage_whisper_sentences.json`: Merged `Sentence ID` list of this run (with Show Mode role tags). Each run writes it again.
+
+Inference and Show Mode audit files (when the step runs):
+- `output/raw_footage_<suffix>_chunk<N>_raw.txt`: Raw Gemini output of each video chunk.
+- `output/raw_footage_<suffix>_chunks_raw.json`: All chunk results (`--assemble`); input for `--reuse-chunks`.
+- `output/raw_footage_<suffix>_chunks_sig.json`: Sentence signature (id / start / end / role hash and transcription settings) of the chunk results; `--reuse-chunks` compares with it.
+- `output/raw_footage_<suffix>_assembly_raw.txt` (`_assembly_raw_retry.txt`), `_assembly_meta.json`: Raw assembly output, status and usage.
+- `output/usage_log.jsonl`: Token usage, one line per inference run and per assembly attempt.
 
 ---
 

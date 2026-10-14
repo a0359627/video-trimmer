@@ -15,6 +15,7 @@ import json
 import logging
 import math
 import os
+import shlex
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -68,10 +69,18 @@ from .gemini_client import (
 from .render import probe_video, render_cut_video
 from .assembly import (
     DEGRADED_BANNER,
+    SIG_SOURCE_INFERENCE,
+    SIG_SOURCE_LEGACY_FILE,
+    SIG_SOURCE_REUSE_CHECKED,
+    SIG_SOURCE_REUSE_UNCHECKED,
     STATUS_DEGRADED,
     assemble_with_fallback,
+    chunk_signature_path,
     iter_candidates,
     load_chunk_results,
+    read_chunk_signature,
+    sentence_signature,
+    write_chunk_signature,
 )
 from .transcribe import (
     calculate_active_script_window,
@@ -169,15 +178,18 @@ def _merge_chunk_results(chunk_edl_results: list[dict], project_title: str) -> d
 
 
 def _run_show_assembly(args, client, chunk_edl_results, whisper_units, prompt_candidates, reference_script_path,
-                       script_path, out_dir, base_name, tag, video_path):
+                       script_path, out_dir, base_name, tag, video_path, transcription_settings=None,
+                       sig_source=SIG_SOURCE_INFERENCE):
     """Step 4a: Show Mode full-programme assembly (text only) with retry and degraded fallback.
 
-    Writes `<base>_<tag>_chunks_raw.json`, the raw assembly output and `<base>_<tag>_assembly_meta.json`,
-    and appends one usage_log line per attempt. Returns (model_edl, info, usage, duration).
+    Writes `<base>_<tag>_chunks_raw.json` with its sentence signature `<base>_<tag>_chunks_sig.json`,
+    the raw assembly output and `<base>_<tag>_assembly_meta.json`, and appends one usage_log line per
+    attempt. Returns (model_edl, info, usage, duration).
     """
-    (out_dir / f"{base_name}_{tag}_chunks_raw.json").write_text(
-        json.dumps(chunk_edl_results, ensure_ascii=False, indent=2), encoding="utf-8"
-    )
+    chunks_json = out_dir / f"{base_name}_{tag}_chunks_raw.json"
+    chunks_json.write_text(json.dumps(chunk_edl_results, ensure_ascii=False, indent=2), encoding="utf-8")
+    write_chunk_signature(chunk_signature_path(chunks_json), whisper_units, transcription_settings or {},
+                          sig_source, video_path.name)
     n_candidates = len(iter_candidates(chunk_edl_results))
 
     def _log_attempt(rec):
@@ -223,10 +235,48 @@ def _prepend_assembly_banner(md_path: Path, info: dict) -> None:
     md_path.write_text("\n".join(lines[:insert_at] + banner + lines[insert_at:]) + "\n", encoding="utf-8")
 
 
+_SKILL_DIR = Path(__file__).resolve().parent.parent  # skills/video-trimmer
+_PLUGIN_ROOT = _SKILL_DIR.parent.parent
+SHOW_PROMPT_HINT = "skills/video-trimmer/prompts/video_cut_prompt_show.md"
+
+
+def _resolve_prompt_arg(prompt_arg: str) -> Path:
+    """Resolve `--prompt` to an existing file. A missing file is an error: never fall back to the default prompt.
+
+    A relative path is tried against the working directory, then the skill folder (`skills/video-trimmer`),
+    then the plugin root. So `prompts/video_cut_prompt_show.md` and
+    `skills/video-trimmer/prompts/video_cut_prompt_show.md` both find the Show Mode prompt.
+    """
+    p = Path(str(prompt_arg)).expanduser()
+    tried: list[Path] = []
+    for cand in ([p] if p.is_absolute() else [Path.cwd() / p, _SKILL_DIR / p, _PLUGIN_ROOT / p]):
+        if cand.resolve() not in [t.resolve() for t in tried]:
+            tried.append(cand)
+    for cand in tried:
+        if cand.is_file():
+            return cand.resolve()
+    raise InvalidInputError(
+        f"找不到 --prompt 指定的提示詞檔案：{prompt_arg}（已找過：{'、'.join(str(c) for c in tried)}）。"
+        f"不會改用預設提示詞。Show Mode 請用 {SHOW_PROMPT_HINT}"
+    )
+
+
+def _require_existing_file(path_arg: str | None, flag: str) -> Path | None:
+    """Return the resolved path of an optional input file; a given path that does not exist is an error."""
+    if not path_arg:
+        return None
+    p = Path(str(path_arg)).expanduser().resolve()
+    if not p.is_file():
+        raise InvalidInputError(f"找不到 {flag} 指定的檔案：{p}")
+    return p
+
+
 def _video_cut_prompt_candidates(args) -> list[Path]:
+    """Master prompt candidates. With `--prompt`, the first entry is that file (it must exist); the default
+    locations stay in the list only so that `assembly_prompt.md` can be found next to them."""
     _resolved_file = Path(__file__).resolve()
     return [
-        *([Path(args.prompt).expanduser().resolve()] if getattr(args, "prompt", None) else []),
+        *([_resolve_prompt_arg(args.prompt)] if getattr(args, "prompt", None) else []),
         Path(__file__).parent / "prompts" / "video_cut_prompt.md",
         Path(__file__).parent.parent / "prompts" / "video_cut_prompt.md",
         Path.cwd() / "prompts" / "video_cut_prompt.md",
@@ -235,32 +285,168 @@ def _video_cut_prompt_candidates(args) -> list[Path]:
     ]
 
 
-def _check_reused_chunk_sentences(chunk_files: list[Path], whisper_units: list[dict], base_name: str) -> None:
+def _transcription_settings(args, out_dir: Path, base_name: str) -> dict:
+    """Transcription settings that change the Sentence IDs, recorded in the chunk signature.
+
+    The Whisper model is the one recorded in `<stem>_whisper_meta.json` (a cached transcript keeps its own
+    model whatever `--whisper-model` says).
+    """
+    model = None
+    if getattr(args, "skip_whisper", False):
+        model = "none"
+    else:
+        meta = out_dir / f"{base_name}_whisper_meta.json"
+        if meta.exists():
+            try:
+                model = json.loads(meta.read_text(encoding="utf-8")).get("model")
+            except (OSError, ValueError):
+                model = None
+    return {
+        "whisper_model": model or "unknown",
+        "offscreen_channel": str(getattr(args, "offscreen_channel", None) or "none").lower(),
+        "skip_whisper": bool(getattr(args, "skip_whisper", False)),
+        "zh_convert": (os.environ.get("WHISPER_ZH_CONVERT") or "s2tw").strip(),
+    }
+
+
+def _load_reuse_reference(chunk_files: list[Path], base_name: str, out_dir: Path | None = None,
+                          video_name: str = "") -> tuple[dict | None, str]:
+    """Read the sentence identity that the reused chunk results were made with. Returns (reference, name).
+
+    Call this BEFORE transcription: the transcription writes `<stem>_whisper_sentences.json` again in the
+    output folder, which is often the folder of the chunk results.
+    1. `<base>_<tag>_chunks_sig.json`, written together with the chunk results.
+    2. Older chunk results without it: `<stem>_whisper_sentences.json` next to them, read now. When the chunk
+       results are in the output folder, this run overwrites that file, so its signature is first written
+       to `<base>_<tag>_chunks_sig.json`: a second run then still compares with the original sentences.
+    3. Neither: (None, "") and the check only warns.
+    """
+    if not chunk_files:
+        return None, ""
+    sig_path = chunk_signature_path(chunk_files[0])
+    if sig_path.exists():
+        return read_chunk_signature(sig_path), sig_path.name
+    legacy = chunk_files[0].parent / f"{base_name}_whisper_sentences.json"
+    if legacy.exists():
+        try:
+            old_units = json.loads(legacy.read_text(encoding="utf-8"))
+        except (OSError, ValueError) as e:
+            raise InvalidInputError(f"無法讀取 {legacy}: {e}") from e
+        if not isinstance(old_units, list):
+            raise InvalidInputError(f"{legacy} 不是句子陣列")
+        if out_dir is not None and chunk_files[0].parent.resolve() == Path(out_dir).resolve():
+            write_chunk_signature(sig_path, old_units, {}, SIG_SOURCE_LEGACY_FILE, video_name)
+            logger.info("    [重用區段] 舊區段結果沒有句子簽章：轉錄前先把 %s 的簽章存成 %s（之後以它核對）",
+                        legacy.name, sig_path.name)
+        return {"source": SIG_SOURCE_LEGACY_FILE, **sentence_signature(old_units)}, legacy.name
+    return None, ""
+
+
+def _check_reused_chunk_sentences(reference: dict | None, reference_name: str, whisper_units: list[dict],
+                                  settings: dict | None = None) -> None:
     """Fail closed when reused chunk results were made with different Sentence IDs.
 
-    The chunk results refer to sentences by ID. When the saved `<stem>_whisper_sentences.json` next to
-    them differs from the current sentences (id / start / end), the IDs point at different audio.
+    The chunk results refer to sentences by ID. When the reference signature (read before transcription)
+    differs from the current sentences (id / start / end / speaker_id), the IDs point at different audio.
     """
-    saved = chunk_files[0].parent / f"{base_name}_whisper_sentences.json" if chunk_files else None
-    if saved is None or not saved.exists():
-        logger.warning("    [重用區段] 找不到區段結果旁的 %s_whisper_sentences.json，無法核對句子編號；請確認與目前轉錄一致",
-                       base_name)
+    if reference is None:
+        logger.warning("    [重用區段] 區段結果旁沒有句子簽章（*_chunks_sig.json）也沒有 <stem>_whisper_sentences.json，"
+                       "無法核對句子編號；請確認與目前轉錄一致")
         return
-    try:
-        old_units = json.loads(saved.read_text(encoding="utf-8"))
-    except (OSError, ValueError) as e:
-        raise InvalidInputError(f"無法讀取 {saved}: {e}") from e
-
-    def _sig(units):
-        return [(int(u.get("id", -1)), round(float(u.get("start", 0.0)), 2), round(float(u.get("end", 0.0)), 2))
-                for u in units if isinstance(u, dict)]
-
-    if _sig(old_units) != _sig(whisper_units):
+    current = sentence_signature(whisper_units)
+    old_settings = reference.get("transcription")
+    diffs = []
+    if isinstance(old_settings, dict) and old_settings and settings:
+        diffs = [f"{k}: 舊 {old_settings.get(k)}，目前 {settings.get(k)}"
+                 for k in sorted(set(old_settings) | set(settings)) if old_settings.get(k) != settings.get(k)]
+    if (reference.get("sentence_sha256") != current["sentence_sha256"]
+            or int(reference.get("sentence_count", -1)) != current["sentence_count"]):
         raise InvalidInputError(
-            f"重用的區段結果與目前的 Whisper 句子不一致（{saved.name}: {len(old_units)} 句，目前 {len(whisper_units)} 句），"
-            "句子編號會對到錯的時間。請沿用產生區段結果時的 _whisper_raw.json 與相同的轉錄設定。"
+            f"重用的區段結果與目前的 Whisper 句子不一致（{reference_name}: {reference.get('sentence_count')} 句，"
+            f"目前 {current['sentence_count']} 句"
+            + (f"；轉錄設定不同：{'；'.join(diffs)}" if diffs else "")
+            + "），句子編號會對到錯的時間。請沿用產生區段結果時的 _whisper_raw.json 與相同的轉錄設定"
+              "（--offscreen-channel、--whisper-model、--skip-whisper）。"
         )
-    logger.info("    [重用區段] 句子編號核對一致（%d 句）", len(whisper_units))
+    if diffs:
+        logger.warning("    [重用區段] 句子相同，但轉錄設定的紀錄不同：%s", "；".join(diffs))
+    if reference.get("source") == SIG_SOURCE_REUSE_UNCHECKED:
+        logger.warning("    [重用區段] %s 是由沒有核對依據的重用執行寫出，最初的區段推論是否用同一組句子無法確認",
+                       reference_name)
+    logger.info("    [重用區段] 句子編號核對一致（%d 句，依據 %s）", current["sentence_count"], reference_name)
+
+
+def _remediation_cli_flags(args, out_dir: Path) -> str:
+    """Rebuild the CLI options of this run for `agent_verdict.remediation_cmd`.
+
+    `audit_edl_quality` adds `-i` and `-s`. Every other option that changes the result is carried here,
+    so the remediation run writes to the same folder with the same tag, reuses the Whisper cache and
+    keeps the same cut rules. Paths are absolute; values are quoted for a POSIX shell.
+    """
+    def q(value) -> str:
+        return shlex.quote(str(value))
+
+    def path_q(value) -> str:
+        return q(Path(str(value)).expanduser().resolve())
+
+    flags = ["-o", path_q(out_dir)]
+    if getattr(args, "suffix", None):
+        flags += ["--suffix", q(args.suffix)]
+    if getattr(args, "model", None):
+        flags += ["--model", q(args.model)]
+    for opt, attr in (("--project", "project"), ("--region", "region"), ("--bucket", "bucket")):
+        if getattr(args, attr, None):
+            flags += [opt, q(getattr(args, attr))]
+    if getattr(args, "keep_gcs_upload", False):
+        flags.append("--keep-gcs-upload")
+    if getattr(args, "agentic", False):
+        flags.append("--agentic")
+    pacing = str(getattr(args, "pacing", "auto") or "auto")
+    if pacing != "auto":
+        flags += ["--pacing", q(pacing)]
+    crf = getattr(args, "crf", 18)
+    if crf is not None and int(crf) != 18:
+        flags += ["--crf", str(int(crf))]
+    if getattr(args, "cached_json", None):
+        flags += ["--cached-json", path_q(args.cached_json)]
+    if getattr(args, "skip_whisper", False):
+        flags.append("--skip-whisper")
+    if getattr(args, "whisper_model", None):
+        flags += ["--whisper-model", q(args.whisper_model)]
+    if getattr(args, "strict", False):
+        flags.append("--strict")
+    if getattr(args, "verbose", False):
+        flags.append("--verbose")
+    # Show Mode
+    if getattr(args, "prompt", None):
+        flags += ["--prompt", path_q(args.prompt)]
+    if getattr(args, "reference_script", None):
+        flags += ["--reference-script", path_q(args.reference_script)]
+    offscreen = str(getattr(args, "offscreen_channel", None) or "none").lower()
+    if offscreen != "none":
+        flags += ["--offscreen-channel", q(offscreen)]
+    if getattr(args, "analysis_video", None):
+        flags += ["--analysis-video", path_q(args.analysis_video)]
+    if getattr(args, "assemble", False):
+        flags.append("--assemble")
+    if getattr(args, "reuse_chunks", None):
+        flags += ["--reuse-chunks", path_q(args.reuse_chunks)]
+    if getattr(args, "allow_reorder", False):
+        flags.append("--allow-reorder")
+    if getattr(args, "xml_only", False):
+        flags.append("--xml-only")
+    if getattr(args, "no_render", False):
+        flags.append("--no-render")
+    if getattr(args, "repeats_as_warnings", False):
+        flags.append("--repeats-as-warnings")
+    if getattr(args, "keep_pause_sec", None) is not None:
+        flags += ["--keep-pause-sec", q(float(args.keep_pause_sec))]
+    if getattr(args, "tail_pad_sec", None):
+        flags += ["--tail-pad-sec", q(float(args.tail_pad_sec))]
+    xml_profile = str(getattr(args, "xml_profile", "premiere") or "premiere").lower()
+    if xml_profile != "premiere":
+        flags += ["--xml-profile", q(xml_profile)]
+    return " ".join(flags)
 
 
 def _resolve_output_dir(output_dir_arg: str | None, default_parent: Path) -> Path:
@@ -274,6 +460,14 @@ def _resolve_output_dir(output_dir_arg: str | None, default_parent: Path) -> Pat
 
 
 def _run(args):
+    # Check the given input files first (before download, transcription or any cloud call). A missing file
+    # is an error: a silent fallback would change the mode (default prompt, Mode B) and still cost a cloud run.
+    if getattr(args, "prompt", None):
+        args.prompt = str(_resolve_prompt_arg(args.prompt))
+        logger.info("    Master prompt: %s", args.prompt)
+    _require_existing_file(getattr(args, "script", None), "--script")
+    _require_existing_file(getattr(args, "reference_script", None), "--reference-script")
+
     if is_gdrive_source(args.input):
         out_dir = _resolve_output_dir(args.output_dir, Path.cwd())
         try:
@@ -294,6 +488,15 @@ def _run(args):
     base_name = video_path.stem
 
     tag = args.suffix if args.suffix else ("agentic" if args.agentic else "static")
+
+    # --reuse-chunks: load the chunk results and their sentence reference now, before transcription
+    # writes <stem>_whisper_sentences.json again (often in the same folder as the chunk results).
+    reuse = None
+    if getattr(args, "reuse_chunks", None) and not args.cached_json:
+        chunk_edl_results, chunk_files = load_chunk_results(Path(args.reuse_chunks))
+        reference, reference_name = _load_reuse_reference(chunk_files, base_name, out_dir, video_path.name)
+        reuse = {"results": chunk_edl_results, "files": chunk_files,
+                 "reference": reference, "reference_name": reference_name}
 
     logger.info("==> 1. Probing input video: %s", video_path.name)
     logger.info("    Output directory: %s", out_dir)
@@ -316,6 +519,7 @@ def _run(args):
         )
 
     whisper_units = whisper_sentences if whisper_sentences else whisper_segs
+    transcription_settings = _transcription_settings(args, out_dir, base_name)
 
     if getattr(args, "transcribe_only", False):
         role_counts: dict[str, int] = {}
@@ -352,11 +556,11 @@ def _run(args):
         logger.info("==> 3. Skipping Gemini inference and loading cached EDL: %s", cached_file.name)
         with open(cached_file, "r", encoding="utf-8") as f:
             model_edl = json.load(f)
-    elif getattr(args, "reuse_chunks", None):
+    elif reuse is not None:
         # Re-run only the assembly step from saved chunk results: no video upload and no chunk inference.
-        chunk_edl_results, chunk_files = load_chunk_results(Path(args.reuse_chunks))
+        chunk_edl_results, chunk_files = reuse["results"], reuse["files"]
         logger.info("==> 3. 重用既有區段結果（不上傳影片、不重跑區段推論）: %s", ", ".join(f.name for f in chunk_files))
-        _check_reused_chunk_sentences(chunk_files, whisper_units, base_name)
+        _check_reused_chunk_sentences(reuse["reference"], reuse["reference_name"], whisper_units, transcription_settings)
         usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
         duration = 0.0
         if getattr(args, "assemble", False) and whisper_units:
@@ -366,6 +570,8 @@ def _run(args):
             model_edl, assembly_info, a_usage, a_dur = _run_show_assembly(
                 args, client, chunk_edl_results, whisper_units, _video_cut_prompt_candidates(args),
                 reference_script_path, script_path, out_dir, base_name, tag, video_path,
+                transcription_settings=transcription_settings,
+                sig_source=SIG_SOURCE_REUSE_CHECKED if reuse["reference"] is not None else SIG_SOURCE_REUSE_UNCHECKED,
             )
             duration += a_dur
             for k in usage:
@@ -488,7 +694,12 @@ def _run(args):
                     usage[k] += c_usage.get(k, 0)
 
                 # 先把原始回傳落地再解析，解析失敗時仍可查核模型輸出
-                (out_dir / f"{base_name}_{tag}_chunk{idx}_raw.txt").write_text(c_raw_json or "", encoding="utf-8")
+                chunk_raw_path = out_dir / f"{base_name}_{tag}_chunk{idx}_raw.txt"
+                chunk_raw_path.write_text(c_raw_json or "", encoding="utf-8")
+                if idx == 1:
+                    # Sentence signature for a later --reuse-chunks run (one file per chunk set)
+                    write_chunk_signature(chunk_signature_path(chunk_raw_path), whisper_units, transcription_settings,
+                                          SIG_SOURCE_INFERENCE, video_path.name)
                 chunk_edl_results.append(_parse_gemini_json_text(c_raw_json))
 
             # Each chunk numbers timeline_position from 1: renumber across the project (chunk value kept)
@@ -500,6 +711,7 @@ def _run(args):
                 model_edl, assembly_info, assembly_usage, assembly_dur = _run_show_assembly(
                     args, client, chunk_edl_results, whisper_units, prompt_candidates,
                     reference_script_path, script_path, out_dir, base_name, tag, video_path,
+                    transcription_settings=transcription_settings,
                 )
                 duration += assembly_dur
                 for k in usage:
@@ -716,29 +928,7 @@ def _run(args):
     logger.info("    Retained clips: %d | Trimmed duration: %.1f s (~%.2f min) | Average CPS: %.2f chars/s",
                 len(refined_edl), total_out_dur, total_out_dur / 60, avg_cps)
 
-    # Flags carried into the audit remediation_cmd (Show Mode, render and XML profile options)
-    show_mode_flags = []
-    if getattr(args, "prompt", None):
-        show_mode_flags.append(f'--prompt "{args.prompt}"')
-    if reference_script_path is not None:
-        show_mode_flags.append(f'--reference-script "{reference_script_path}"')
-    if getattr(args, "offscreen_channel", None) and str(args.offscreen_channel).lower() != "none":
-        show_mode_flags.append(f"--offscreen-channel {args.offscreen_channel}")
-    if getattr(args, "analysis_video", None):
-        show_mode_flags.append(f'--analysis-video "{args.analysis_video}"')
-    if getattr(args, "assemble", False):
-        show_mode_flags.append("--assemble")
-    if allow_reorder:
-        show_mode_flags.append("--allow-reorder")
-    if getattr(args, "xml_only", False):
-        show_mode_flags.append("--xml-only")
-    if getattr(args, "repeats_as_warnings", False):
-        show_mode_flags.append("--repeats-as-warnings")
-    if getattr(args, "no_render", False):
-        show_mode_flags.append("--no-render")
     xml_profile = str(getattr(args, "xml_profile", "premiere") or "premiere").lower()
-    if xml_profile != "premiere":
-        show_mode_flags.append(f"--xml-profile {xml_profile}")
 
     audit_report = audit_edl_quality(
         refined_edl=refined_edl,
@@ -751,7 +941,8 @@ def _run(args):
         micro_window_repairs=micro_window_repairs,
         allow_reorder=allow_reorder,
         mode_label=("Mode C (Script Reference, Show Mode)" if reference_script_text is not None else None),
-        extra_cli_flags=" ".join(show_mode_flags),
+        # remediation_cmd: every option of this run (same output folder, tag, cut rules and Whisper cache)
+        extra_cli_flags=_remediation_cli_flags(args, out_dir),
         repeats_as_warnings=bool(getattr(args, "repeats_as_warnings", False)),
     )
     if assembly_info is not None:
@@ -833,10 +1024,7 @@ def _run(args):
         sys.exit(2)
 
 
-def main():
-    load_env_file()
-    default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
-
+def _build_arg_parser(default_model: str) -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="video-trimmer: AI-Powered Smart Video Trimmer (Whisper Ground-Truth + Vertex AI Gemini)")
     parser.add_argument("--input", "-i", required=True, help="Path to input video file (.mp4/.mov) or Google Drive share link (https://drive.google.com/... / gdrive://...)")
     parser.add_argument("--output-dir", "-o", default=None, help="Output directory (defaults to <input_dir>/output/, or ./output/ for Google Drive links)")
@@ -866,7 +1054,9 @@ def main():
     # Show Mode（節目型拍帶：主持人 + 場外聲音角色）。以下旗標預設全部關閉，不影響原有行為。
     show = parser.add_argument_group("Show Mode（主持人 + 場外聲音角色）")
     show.add_argument("--prompt", default=None,
-                      help="指定提示詞檔案（例如 prompts/video_cut_prompt_show.md），預設使用 prompts/video_cut_prompt.md")
+                      help=f"指定主提示詞檔案；Show Mode 用 {SHOW_PROMPT_HINT}。相對路徑依序對照目前目錄、"
+                           "skill 目錄（skills/video-trimmer，所以 prompts/video_cut_prompt_show.md 也可以）與 plugin 根目錄；"
+                           "找不到就中止（exit 1），不會改用預設。未指定時用 prompts/video_cut_prompt.md")
     show.add_argument("--reference-script", default=None,
                       help="Mode C：腳本只作結構參考（不做 Mode A 覆蓋率檢查與單向消耗），TXT/MD")
     show.add_argument("--offscreen-channel", choices=["none", "auto", "left", "right"], default="none",
@@ -879,7 +1069,8 @@ def main():
     show.add_argument("--reuse-chunks", default=None,
                       help="重用既有區段結果（*_chunks_raw.json、*_chunk1_raw.txt 或只含一組區段結果的資料夾），"
                            "不上傳影片、不重跑區段推論；配合 --assemble 只重跑全片組裝。沒有影片可重掃，略過 Micro-Window Repair。"
-                           "區段結果旁若有 <stem>_whisper_sentences.json，句子編號不一致時會中止")
+                           "句子編號核對：用區段結果旁的 <base>_<tag>_chunks_sig.json（產生區段結果時寫出）；"
+                           "舊結果沒有它時，改用轉錄前讀到的 <stem>_whisper_sentences.json。不一致時中止")
     show.add_argument("--allow-reorder", action="store_true",
                       help="允許成片順序與原片時間順序不同（依 timeline_position），順序顛倒改為警告而非 fatal")
     show.add_argument("--xml-only", action="store_true", help="只輸出 JSON/CSV/XML/FCPXML 與審計報告，不渲染 MP4")
@@ -892,7 +1083,13 @@ def main():
                       help="每個 clip 尾字之後多留的時間（秒），讓想法落地；不會跨進下一句開口。預設 0，節目型建議 0.25")
     show.add_argument("--transcribe-only", action="store_true",
                       help="只做 Whisper 轉錄與句子合併（含角色標籤）後結束，不上傳也不呼叫 Gemini")
-    args = parser.parse_args()
+    return parser
+
+
+def main():
+    load_env_file()
+    default_model = os.environ.get("MODEL_NAME") or os.environ.get("TRIMMER_MODEL") or "gemini-3.8-flash"
+    args = _build_arg_parser(default_model).parse_args()
 
     _setup_logging(args.verbose)
 

@@ -194,14 +194,18 @@ Antigravity에서는 다음 두 가지 방식으로 **Video Trimmer**를 사용�
 | 플래그 | 설명 |
 | :--- | :--- |
 | `--offscreen-channel auto\|left\|right` | 화면 밖 마이크 채널. 문장마다 `[HOST]`／`[OFFSCREEN]`／`[CUE]` 태그를 붙이고 역할이 바뀌는 지점에서 분리합니다. 카운트다운은 항상 제외, 화면 밖 대사는 모델이 판단합니다. |
-| `--prompt prompts/video_cut_prompt_show.md` | 쇼 전용 프롬프트. 대본의 목소리 역할과 일치하거나 진행자가 대답하는 화면 밖 질문·리액션은 별도 `offscreen` 클립으로 유지(XML 이름 접두사 `[場外]`), 대사 불러주기·지시·잡담은 제외. |
-| `--reference-script` | Mode C: 대본은 구조 참고용. Mode A의 단방향 소비와 커버리지 게이트 없음. |
+| `--prompt skills/video-trimmer/prompts/video_cut_prompt_show.md` | 쇼 전용 프롬프트. 대본의 목소리 역할과 일치하거나 진행자가 대답하는 화면 밖 질문·리액션은 별도 `offscreen` 클립으로 유지(XML 이름 접두사 `[場外]`), 대사 불러주기·지시·잡담은 제외. 상대 경로는 작업 디렉터리, 스킬 폴더(`skills/video-trimmer`, 따라서 `prompts/video_cut_prompt_show.md`도 가능), 플러그인 루트 순서로 찾습니다. 파일이 없으면 중단(exit 1)하며 기본 프롬프트로 바꾸지 않습니다. |
+| `--reference-script` | Mode C: 대본은 구조 참고용. Mode A의 단방향 소비와 커버리지 게이트 없음. 파일이 없으면 중단. |
 | `--assemble` | 청크 추론 후 텍스트 전용 전체 조립: 청크 간 테이크 선택, 섹션 라벨, 타임라인 순서. |
-| `--reuse-chunks` | With `--assemble`: reuse existing chunk results and rerun only the assembly (no upload). On truncated/invalid output it retries once with a compact format, then degrades to chunk results in source order (unique `timeline_position`). |
+|  | 조립 출력이 잘리거나 형식이 잘못되면 최소 형식으로 한 번만 재시도하고, 그래도 실패하면 청크 결과를 원본 시간 순서로 사용(`timeline_position`은 전체에서 고유)하며 보고서에 표시합니다. 원본 출력: `<stem>_<suffix>_assembly_raw.txt`(재시도: `_assembly_raw_retry.txt`), `_assembly_meta.json`. |
+| `--reuse-chunks` | 기존 청크 결과(`<stem>_<suffix>_chunks_raw.json`, `_chunk1_raw.txt` 또는 한 세트만 있는 폴더)를 재사용. 업로드와 청크 추론 없음. `--assemble`과 함께 쓰면 조립만 다시 실행. |
+|  | 문장 ID 확인(불일치 시 중단): 청크 결과와 함께 기록되는 `<stem>_<suffix>_chunks_sig.json`(문장 id/시작/끝/역할의 해시와 전사 설정)과 비교합니다. 서명이 없는 이전 결과는 전사 전에 읽은 `<stem>_whisper_sentences.json`과 비교합니다. 같은 `_whisper_raw.json`과 같은 `--offscreen-channel`/`--whisper-model`을 사용하세요. |
 | `--allow-reorder` | 조립 순서 유지. 순서 역전은 경고로만 처리. |
 | `--analysis-video` | 업로드와 분석에 프록시(예: 1080p) 사용. Whisper, 음향 고정, XML은 원본 기준. |
 | `--xml-only` | MP4 렌더링 생략. |
 | `--repeats-as-warnings` | 클립 내 반복 구절(대구, 의도적 반복)을 fatal 대신 경고로 처리. |
+| `--keep-pause-sec` | 하나의 생각 안에서 남길 쉼의 상한(초). 이보다 짧은 쉼은 자르지 않고 연속 문장을 한 클립으로 합칩니다. 지정하지 않으면 기본 조정값(문장 간 `0.65`초 / 단어 간 `0.70`초). 쇼 촬영본 권장값 `1.0`. |
+| `--tail-pad-sec` | 각 클립의 마지막 단어 뒤에 남길 시간(초). 다음 소리(각 마이크의 음향 온셋)에는 들어가지 않습니다. 기본값 `0`, 쇼 촬영본 권장값 `0.25`. |
 | `--transcribe-only` | 전사와 역할 태깅만 수행. |
 
 ```bash

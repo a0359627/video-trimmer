@@ -14,6 +14,7 @@ import difflib
 import logging
 import math
 import re
+import shlex
 from pathlib import Path
 
 from .acoustic import calculate_clip_cps
@@ -1221,11 +1222,11 @@ def audit_edl_quality(
     remediation_cmd = None
     remediation_reason = None
     if not pass_gate:
-        script_flag = f' -s "{script_path}"' if script_path else ""
+        script_flag = f" -s {shlex.quote(str(script_path))}" if script_path else ""
         remediation_reason = "; ".join(fatal_violations)
         extra = f" {extra_cli_flags.strip()}" if extra_cli_flags and extra_cli_flags.strip() else ""
         remediation_cmd = (
-            f'python3 skills/video-trimmer/scripts/video_trimmer.py -i "{video_path}"{script_flag}{extra}'
+            f"python3 skills/video-trimmer/scripts/video_trimmer.py -i {shlex.quote(str(video_path))}{script_flag}{extra}"
         )
 
     return {

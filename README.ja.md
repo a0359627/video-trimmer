@@ -194,14 +194,18 @@ Antigravity では、以下の 2 つの方法で **Video Trimmer** を操作で�
 | フラグ | 説明 |
 | :--- | :--- |
 | `--offscreen-channel auto\|left\|right` | 画面外マイクのチャンネル。各文に `[HOST]`／`[OFFSCREEN]`／`[CUE]` を付け、役が切り替わる位置で分割します。カウントダウンは常に除外、画面外の台詞はモデルが判定します。 |
-| `--prompt prompts/video_cut_prompt_show.md` | 番組用プロンプト。台本の声の役に一致する、または司会者が応答する画面外の質問・リアクションは独立した `offscreen` クリップとして保持（XML 名は `[場外]` 接頭辞）。台詞の先読み、指示、雑談は除外。 |
-| `--reference-script` | Mode C：台本は構成の参考のみ。Mode A の単方向消費とカバレッジゲートは無効。 |
+| `--prompt skills/video-trimmer/prompts/video_cut_prompt_show.md` | 番組用プロンプト。台本の声の役に一致する、または司会者が応答する画面外の質問・リアクションは独立した `offscreen` クリップとして保持（XML 名は `[場外]` 接頭辞）。台詞の先読み、指示、雑談は除外。相対パスは作業ディレクトリ、スキルフォルダ（`skills/video-trimmer`。`prompts/video_cut_prompt_show.md` でも可）、プラグインルートの順に探します。ファイルがなければ中止（exit 1）し、デフォルトのプロンプトには切り替えません。 |
+| `--reference-script` | Mode C：台本は構成の参考のみ。Mode A の単方向消費とカバレッジゲートは無効。ファイルがなければ中止。 |
 | `--assemble` | チャンク推論後にテキストのみの全体アセンブリを実行：チャンク間のテイク裁定、セクション名、タイムライン順。 |
-| `--reuse-chunks` | With `--assemble`: reuse existing chunk results and rerun only the assembly (no upload). On truncated/invalid output it retries once with a compact format, then degrades to chunk results in source order (unique `timeline_position`). |
+|  | アセンブリ出力が途中で切れた、または形式が不正な場合は最小形式で 1 回だけ再試行し、それでも失敗したらチャンク結果を元の時間順で使用（`timeline_position` は全体で一意）し、レポートに明記します。生出力：`<stem>_<suffix>_assembly_raw.txt`（再試行：`_assembly_raw_retry.txt`）、`_assembly_meta.json`。 |
+| `--reuse-chunks` | 既存のチャンク結果（`<stem>_<suffix>_chunks_raw.json`、`_chunk1_raw.txt`、または 1 組だけを含むフォルダ）を再利用。アップロードとチャンク推論なし。`--assemble` と併用するとアセンブリだけを再実行。 |
+|  | 文 ID の照合（不一致なら中止）：チャンク結果と同時に書き出される `<stem>_<suffix>_chunks_sig.json`（文 id／開始／終了／役のハッシュと文字起こし設定）と比較します。署名のない古い結果は、文字起こし前に読んだ `<stem>_whisper_sentences.json` と比較します。同じ `_whisper_raw.json` と同じ `--offscreen-channel`／`--whisper-model` を使ってください。 |
 | `--allow-reorder` | アセンブリ順を維持。順序の入れ替わりは警告扱い。 |
 | `--analysis-video` | アップロードと解析にプロキシ（例：1080p）を使用。Whisper、音響ロック、XML は元ファイル基準。 |
 | `--xml-only` | MP4 をレンダリングしない。 |
 | `--repeats-as-warnings` | クリップ内の反復表現（対句・意図的な繰り返し）を fatal ではなく警告として扱う。 |
+| `--keep-pause-sec` | 1 つの考えの中で残す間の上限（秒）。これより短い間では切らず、連続する文を 1 クリップにまとめます。未指定時はデフォルト調整（文間 `0.65` 秒／単語間 `0.70` 秒）。番組素材の推奨値は `1.0`。 |
+| `--tail-pad-sec` | 各クリップの最後の単語の後に残す時間（秒）。次の音（各マイクの音響オンセット）には入りません。デフォルト `0`、番組素材の推奨値は `0.25`。 |
 | `--transcribe-only` | 文字起こしと役タグ付けのみ。 |
 
 ```bash

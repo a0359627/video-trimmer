@@ -115,18 +115,26 @@ video-trimmer/
 │       ├── scripts/                         # 核心引擎模組實體目錄 (SSOT)
 │       │   ├── __init__.py
 │       │   ├── video_trimmer.py             # CLI 解析與五層管線協調器
+│       │   ├── constants.py                 # 集中管理的具名常數
+│       │   ├── exceptions.py                # 例外類別階層
 │       │   ├── acoustic.py                  # CPS 語速計算、聲學起音鎖定與字尾保護
 │       │   ├── transcribe.py                # 聲學切句、逐字邊界精修與跨片段無縫合一
+│       │   ├── roles.py                     # Show Mode：雙麥克風 HOST／OFFSCREEN／CUE 角色歸屬
 │       │   ├── edl_auditor.py               # 局部小視窗精準重掃、時間軸自癒與 8 維度品質審計
 │       │   ├── gemini_client.py             # Vertex AI (ADC) 客戶端與雙模式提示詞建構
+│       │   ├── assembly.py                  # Show Mode：純文字全片組裝、區段結果重用與句子簽章
 │       │   ├── gcs_utils.py                 # GCS 暫存、Google Drive 快取與中文檔名修復
 │       │   ├── exporters.py                 # FCP7 XML、FCPXML 與 CSV 時間軸匯出
-│       │   └── render.py                    # ffprobe 檢測與 FFmpeg 20ms 微淡化渲染
+│       │   ├── render.py                    # ffprobe 檢測與 FFmpeg 20ms 微淡化渲染
+│       │   └── cut_review.py                # 獨立 CLI：成片通讀評審（成片重新轉錄、標出可疑接點、寫 XML 標記）
 │       └── prompts/                         # 提示詞規範實體目錄 (SSOT)
-│           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
+│           ├── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範（預設）
+│           ├── video_cut_prompt_show.md     # Show Mode 主提示詞（主持人 + 場外聲音角色）
+│           ├── assembly_prompt.md           # Show Mode 全片組裝提示詞（--assemble）
+│           └── cut_review_prompt.md         # 成片通讀評審提示詞（cut_review.py）
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
-└── tests/                                   # 離線單元測試套件（103 項測試）
+└── tests/                                   # 離線單元測試套件（不呼叫雲端）
 ```
 
 ---
@@ -234,15 +242,18 @@ chmod +x setup.sh
 | 旗標 | 說明 |
 | :--- | :--- |
 | `--offscreen-channel auto\|left\|right` | 場外麥克風所在聲道；每句標成 `[HOST]`／`[OFFSCREEN]`／`[CUE]` 並在角色切換處拆句。倒數口令永遠剔除；場外台詞由模型依規則判定保留或剔除。 |
-| `--prompt prompts/video_cut_prompt_show.md` | 節目型主提示詞：對得上腳本聲音角色、或主持人接著回應的場外提問／反應保留為獨立 `offscreen` clip（XML 名稱前綴 `[場外]`）；餵詞、流程指令、閒聊剔除。 |
-| `--reference-script` | Mode C：腳本只作結構參考，不做 Mode A 的單向消耗與覆蓋率閘門，脫稿但切題的內容保留。 |
+| `--prompt skills/video-trimmer/prompts/video_cut_prompt_show.md` | 節目型主提示詞：對得上腳本聲音角色、或主持人接著回應的場外提問／反應保留為獨立 `offscreen` clip（XML 名稱前綴 `[場外]`）；餵詞、流程指令、閒聊剔除。相對路徑依序對照目前目錄、skill 目錄（`skills/video-trimmer`，所以寫 `prompts/video_cut_prompt_show.md` 也可以）與 plugin 根目錄；檔案找不到就中止（exit 1），不會改用預設提示詞。 |
+| `--reference-script` | Mode C：腳本只作結構參考，不做 Mode A 的單向消耗與覆蓋率閘門，脫稿但切題的內容保留。檔案找不到就中止。 |
 | `--assemble` | 分段推論後再做一次純文字全片組裝：跨區段取捨、段落標籤、成片順序。 |
-| `--reuse-chunks` | 搭配 `--assemble`：沿用既有的區段結果（`<stem>_<suffix>_chunk*_raw.txt`），只重跑全片組裝；不上傳、不重做區段推論。 |
-|  | 組裝輸出被截斷或格式錯誤時，先用精簡格式重試一次；仍失敗就降級為各區段結果（照原片順序、`timeline_position` 全片唯一），並在報告標明。原始輸出：`<stem>_<suffix>_assembly_raw.txt`、`_assembly_meta.json`。 |
+|  | 組裝輸出被截斷或格式錯誤時，先用精簡格式重試一次；仍失敗就降級為各區段結果（照原片順序、`timeline_position` 全片唯一），並在報告標明。原始輸出：`<stem>_<suffix>_assembly_raw.txt`（重試：`_assembly_raw_retry.txt`）、`_assembly_meta.json`。 |
+| `--reuse-chunks` | 沿用既有的區段結果（`<stem>_<suffix>_chunks_raw.json`、`_chunk1_raw.txt` 或只含一組結果的資料夾），不上傳、不重做區段推論；搭配 `--assemble` 只重跑全片組裝。 |
+|  | 句子編號核對（不一致就中止）：比對區段結果旁的 `<stem>_<suffix>_chunks_sig.json`（產生區段結果時一併寫出，記錄句子 id／起訖／角色的雜湊與轉錄設定）。沒有簽章的舊結果，改用轉錄之前讀到的 `<stem>_whisper_sentences.json`。請沿用同一份 `_whisper_raw.json` 與相同的 `--offscreen-channel`／`--whisper-model`。 |
 | `--allow-reorder` | 允許成片順序與原片不同；順序顛倒改為警告。 |
 | `--analysis-video` | 上傳與分析用代理檔（例如 1080p），Whisper、聲學鎖定與 XML 仍以原檔為準。 |
 | `--xml-only` | 不渲染 MP4。 |
 | `--repeats-as-warnings` | 句內重複字句（排比、刻意重複）改列為警告而非 fatal。 |
+| `--keep-pause-sec` | 想法內部可保留的停頓上限（秒），小於此值的停頓不切開、連續句子合併成一個 clip。未指定時沿用預設調校（句間 `0.65` 秒／字間 `0.70` 秒）；節目型建議 `1.0`。 |
+| `--tail-pad-sec` | 每個 clip 尾字之後多留的時間（秒），讓想法落地；不會跨進下一段聲音（以每支麥克風的聲學起音為準）。預設 `0`；節目型建議 `0.25`。 |
 | `--transcribe-only` | 只做轉錄與角色標記，用來先確認拍帶狀態。 |
 
 ```bash
@@ -260,7 +271,10 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "raw.mp4" --analysis-vi
 2. **`<basename>_<tag>_edl.xml`**：Final Cut Pro 7 XML 時間軸，**Adobe Premiere Pro** 用 `--xml-profile premiere`（預設），**DaVinci Resolve** 用 `--xml-profile davinci`。
 3. **`<basename>_<tag>_edl.fcpxml`**：適用於 **Apple Final Cut Pro** 的 FCPXML 時間軸。
 4. **`<basename>_<tag>_edl.json`** / **`<basename>_<tag>_edl.csv`**：結構化剪輯決策資料與試算表剪輯清單。
-5. **`<basename>_<tag>_edl_report.md`** / **`.json`**：8 維度粗剪品質審計報告與 `agent_verdict` 自動化品質閘門結果。
+5. **`<basename>_<tag>_edl_report.md`** / **`.json`**：8 維度粗剪品質審計報告與 `agent_verdict` 自動化品質閘門結果。品質閘門未過時，`remediation_cmd` 會帶上這次執行的全部參數（`-o`、`--suffix`、Show Mode 旗標、`--keep-pause-sec`、`--tail-pad-sec` 等，路徑為絕對路徑），補救執行寫回同一個輸出資料夾並沿用 Whisper 快取。
+6. **`<basename>_<tag>_edl_summary.md`**：Markdown 片段摘要表。
+7. **`<basename>_whisper_raw.json`** / **`_whisper_meta.json`** / **`_whisper_sentences.json`**：Whisper 逐字時間戳快取、模型紀錄，以及這次執行的 `Sentence ID` 句子清單（含角色標籤，每次執行都會重寫）。
+8. Show Mode 稽核檔：`<basename>_<tag>_chunk<N>_raw.txt`、`_chunks_raw.json`、`_chunks_sig.json`（句子簽章）、`_assembly_raw.txt`、`_assembly_meta.json`、`usage_log.jsonl`。
 
 ---
 
