@@ -78,6 +78,7 @@ flowchart TD
 ```
 
 1. **第一层：纯声学与标点子句切分 (`transcribe.py`)**：
+   - Whisper 默认模型为 `large-v3`（可用 `--whisper-model small|medium|large-v3|...` 或 `$WHISPER_MODEL` 覆盖），以 `condition_on_previous_text=False` 解码，避免长片段重复循环；中文逐字稿以 OpenCC `s2tw` 统一为繁体（`$WHISPER_ZH_CONVERT=none` 可关闭），时间戳不变。
    - 仅依据物理边界切分 `Sentence ID`：换气停顿（`gap >= 0.20s`）、吃螺丝拉长音起音（`word_dur >= 1.20s`）、句尾标点与说话人轮替，同时保留微停顿（`gap < 0.25s`）下的连词黏合（`CONJUNCTIONS`）。绝不在 Python 中使用字符串相似度猜测 NG 重录。
 2. **第二层：双模式 LLM 语义择优与局部微视窗精准重扫 (`gemini_client.py` / `edl_auditor.py`)**：
    - **Mode A：有讲稿单调锚定模式（提供拍摄讲稿时）**：通过单一真相来源（SSOT）解析器（`extract_script_blocks`）自动过滤 YAML Frontmatter、舞台指示与非口播元数据行（如 `标题：`、`主题：`、`大纲：`、`内文：`、`Title:`、`Subject:`、`Outline:`），将口播台词格式化为 `[Script Block 01] .. [Script Block NN]`，确保提示词与审计器编号 100% 一致，且每个段落最多保留最后一次完整成功的 Take（`Last-Take-Wins`）。
@@ -196,6 +197,8 @@ chmod +x setup.sh
 | `--prompt prompts/video_cut_prompt_show.md` | 节目型主提示词：对得上脚本声音角色、或主持人接着回应的画外提问／反应保留为独立 `offscreen` clip（XML 名称前缀 `[場外]`）；喂词、流程指令、闲聊剔除。 |
 | `--reference-script` | Mode C：脚本只作结构参考，不做 Mode A 的单向消耗与覆盖率闸门。 |
 | `--assemble` | 分段推理后再做一次纯文本全片组装：跨区段取舍、段落标签、成片顺序。 |
+| `--reuse-chunks` | 搭配 `--assemble`：沿用已有的区段结果（`<stem>_<suffix>_chunk*_raw.txt`），只重跑全片组装；不上传、不重做区段推理。 |
+|  | 组装输出被截断或格式错误时，先用精简格式重试一次；仍失败就降级为各区段结果（按原片顺序、`timeline_position` 全片唯一），并在报告标明。原始输出：`<stem>_<suffix>_assembly_raw.txt`、`_assembly_meta.json`。 |
 | `--allow-reorder` | 允许成片顺序与原片不同；顺序颠倒改为警告。 |
 | `--analysis-video` | 上传与分析用代理文件（如 1080p），Whisper、声学锁定与 XML 仍以原文件为准。 |
 | `--xml-only` | 不渲染 MP4。 |

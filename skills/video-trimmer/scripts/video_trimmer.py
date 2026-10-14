@@ -67,10 +67,11 @@ from .gemini_client import (
 )
 from .render import probe_video, render_cut_video
 from .assembly import (
-    build_assembly_prompt,
-    normalize_assembled_edl,
-    parse_assembly_json,
-    run_assembly_inference,
+    DEGRADED_BANNER,
+    STATUS_DEGRADED,
+    assemble_with_fallback,
+    iter_candidates,
+    load_chunk_results,
 )
 from .transcribe import (
     calculate_active_script_window,
@@ -131,8 +132,12 @@ def _validate_input_extension(video_path):
         raise InvalidInputError(f"Unsupported video format: {video_path.suffix} (allowed extensions: {allowed})")
 
 
-def _append_usage_log(out_dir, video_path, model, usage, mode, duration):
-    """Append token usage metrics for each Gemini inference run to usage_log.jsonl."""
+def _append_usage_log(out_dir, video_path, model, usage, mode, duration, extra=None):
+    """Append token usage metrics for each Gemini inference run to usage_log.jsonl.
+
+    The lines add up to the total cost: an assembly attempt is logged on its own line
+    (mode "assembly"), and the run line then excludes it (scope "chunks_and_repairs").
+    """
     usage_log_path = out_dir / "usage_log.jsonl"
     entry = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
@@ -146,8 +151,116 @@ def _append_usage_log(out_dir, video_path, model, usage, mode, duration):
         "total_tokens": usage.get("total_tokens", 0),
         "duration_seconds": round(duration, 2),
     }
+    if extra:
+        entry.update(extra)
     with open(usage_log_path, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+
+
+def _merge_chunk_results(chunk_edl_results: list[dict], project_title: str) -> dict:
+    """Merge chunk EDLs; `timeline_position` becomes unique across the project (chunk value kept in
+    `chunk_timeline_position`). A single chunk keeps its own top-level keys."""
+    merged = merge_chunked_edl(chunk_edl_results, project_title=project_title)
+    if len(chunk_edl_results) == 1 and isinstance(chunk_edl_results[0], dict):
+        single = dict(chunk_edl_results[0])
+        single["final_edl"] = merged["final_edl"]
+        return single
+    return merged
+
+
+def _run_show_assembly(args, client, chunk_edl_results, whisper_units, prompt_candidates, reference_script_path,
+                       script_path, out_dir, base_name, tag, video_path):
+    """Step 4a: Show Mode full-programme assembly (text only) with retry and degraded fallback.
+
+    Writes `<base>_<tag>_chunks_raw.json`, the raw assembly output and `<base>_<tag>_assembly_meta.json`,
+    and appends one usage_log line per attempt. Returns (model_edl, info, usage, duration).
+    """
+    (out_dir / f"{base_name}_{tag}_chunks_raw.json").write_text(
+        json.dumps(chunk_edl_results, ensure_ascii=False, indent=2), encoding="utf-8"
+    )
+    n_candidates = len(iter_candidates(chunk_edl_results))
+
+    def _log_attempt(rec):
+        _append_usage_log(out_dir, video_path, args.model, rec.get("usage") or {}, "assembly",
+                          float(rec.get("duration_seconds") or 0.0),
+                          extra={"scope": "assembly", "attempt": rec.get("attempt"), "format": rec.get("format"),
+                                 "status": rec.get("status"), "finish_reason": rec.get("finish_reason")})
+
+    result = assemble_with_fallback(
+        client, types, args.model, prompt_candidates, chunk_edl_results, whisper_units,
+        out_dir=out_dir, file_stem=f"{base_name}_{tag}",
+        reference_script_path=reference_script_path, script_path=script_path,
+        on_attempt=_log_attempt,
+    )
+    info = result["info"]
+    if info["degraded"]:
+        logger.warning("    [全片組裝] %s（候選 %d -> %d clips）。原因：%s",
+                       DEGRADED_BANNER, n_candidates, info["final_clips"], info["error"])
+    else:
+        logger.info("    [全片組裝] %s：候選 %d -> 最終 %d clips（%.1f 秒）",
+                    info["status"], n_candidates, info["final_clips"], result["duration"])
+    return result["model_edl"], info, result["usage"], result["duration"]
+
+
+def _assembly_report_line(info: dict) -> str:
+    if info.get("degraded"):
+        return f"{DEGRADED_BANNER}。原因：{info.get('error')}"
+    tries = len(info.get("attempts", []))
+    return f"全片組裝成功（{info.get('status')}，第 {tries} 次嘗試）：候選 {info.get('candidates')} -> {info.get('final_clips')} clips"
+
+
+def _prepend_assembly_banner(md_path: Path, info: dict) -> None:
+    """Insert the assembly status under the first heading of a Markdown report."""
+    if not md_path.exists():
+        return
+    lines = md_path.read_text(encoding="utf-8").splitlines()
+    prefix = "> **警告：" if info.get("degraded") else "> "
+    banner = [f"{prefix}{_assembly_report_line(info)}{'**' if info.get('degraded') else ''}",
+              f"> 組裝原始輸出與 usage：{'、'.join([*info.get('raw_files', []), info.get('meta_file', '')])}", ""]
+    insert_at = 1 if lines and lines[0].startswith("#") else 0
+    if insert_at:
+        banner = [""] + banner
+    md_path.write_text("\n".join(lines[:insert_at] + banner + lines[insert_at:]) + "\n", encoding="utf-8")
+
+
+def _video_cut_prompt_candidates(args) -> list[Path]:
+    _resolved_file = Path(__file__).resolve()
+    return [
+        *([Path(args.prompt).expanduser().resolve()] if getattr(args, "prompt", None) else []),
+        Path(__file__).parent / "prompts" / "video_cut_prompt.md",
+        Path(__file__).parent.parent / "prompts" / "video_cut_prompt.md",
+        Path.cwd() / "prompts" / "video_cut_prompt.md",
+        Path(__file__).parent / "video-trimmer" / "prompts" / "video_cut_prompt.md",
+        *[p / "prompts" / "video_cut_prompt.md" for p in _resolved_file.parents[:5]],
+    ]
+
+
+def _check_reused_chunk_sentences(chunk_files: list[Path], whisper_units: list[dict], base_name: str) -> None:
+    """Fail closed when reused chunk results were made with different Sentence IDs.
+
+    The chunk results refer to sentences by ID. When the saved `<stem>_whisper_sentences.json` next to
+    them differs from the current sentences (id / start / end), the IDs point at different audio.
+    """
+    saved = chunk_files[0].parent / f"{base_name}_whisper_sentences.json" if chunk_files else None
+    if saved is None or not saved.exists():
+        logger.warning("    [重用區段] 找不到區段結果旁的 %s_whisper_sentences.json，無法核對句子編號；請確認與目前轉錄一致",
+                       base_name)
+        return
+    try:
+        old_units = json.loads(saved.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as e:
+        raise InvalidInputError(f"無法讀取 {saved}: {e}") from e
+
+    def _sig(units):
+        return [(int(u.get("id", -1)), round(float(u.get("start", 0.0)), 2), round(float(u.get("end", 0.0)), 2))
+                for u in units if isinstance(u, dict)]
+
+    if _sig(old_units) != _sig(whisper_units):
+        raise InvalidInputError(
+            f"重用的區段結果與目前的 Whisper 句子不一致（{saved.name}: {len(old_units)} 句，目前 {len(whisper_units)} 句），"
+            "句子編號會對到錯的時間。請沿用產生區段結果時的 _whisper_raw.json 與相同的轉錄設定。"
+        )
+    logger.info("    [重用區段] 句子編號核對一致（%d 句）", len(whisper_units))
 
 
 def _resolve_output_dir(output_dir_arg: str | None, default_parent: Path) -> Path:
@@ -198,7 +311,7 @@ def _run(args):
         whisper_segs, whisper_sentences = transcribe_video_whisper(
             video_path,
             whisper_json,
-            model_name="small",
+            model_name=getattr(args, "whisper_model", None),
             offscreen_channel=getattr(args, "offscreen_channel", None),
         )
 
@@ -231,6 +344,7 @@ def _run(args):
     audit_script_text = None if reference_script_text is not None else script_text
     window_script_text = script_text
 
+    assembly_info = None
     if args.cached_json:
         cached_file = Path(args.cached_json).resolve()
         if not cached_file.exists():
@@ -238,19 +352,40 @@ def _run(args):
         logger.info("==> 3. Skipping Gemini inference and loading cached EDL: %s", cached_file.name)
         with open(cached_file, "r", encoding="utf-8") as f:
             model_edl = json.load(f)
+    elif getattr(args, "reuse_chunks", None):
+        # Re-run only the assembly step from saved chunk results: no video upload and no chunk inference.
+        chunk_edl_results, chunk_files = load_chunk_results(Path(args.reuse_chunks))
+        logger.info("==> 3. 重用既有區段結果（不上傳影片、不重跑區段推論）: %s", ", ".join(f.name for f in chunk_files))
+        _check_reused_chunk_sentences(chunk_files, whisper_units, base_name)
+        usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
+        duration = 0.0
+        if getattr(args, "assemble", False) and whisper_units:
+            load_env_file()
+            client = get_gemini_client(project_id=args.project, location=args.region)
+            logger.info("==> 4. 只重跑全片組裝（%s，純文字）", args.model)
+            model_edl, assembly_info, a_usage, a_dur = _run_show_assembly(
+                args, client, chunk_edl_results, whisper_units, _video_cut_prompt_candidates(args),
+                reference_script_path, script_path, out_dir, base_name, tag, video_path,
+            )
+            duration += a_dur
+            for k in usage:
+                usage[k] += a_usage.get(k, 0)
+        else:
+            model_edl = _merge_chunk_results(chunk_edl_results, project_title=f"{base_name} AI Video Trimmer ({tag})")
+        logger.warning("    [重用區段] 沒有上傳影片，略過 Micro-Window Repair（局部影片重掃）")
+        inference_metrics = {
+            "mode": "reuse_chunks",
+            "duration_seconds": round(duration, 2),
+            **{k: usage[k] for k in usage},
+            "micro_window_repairs": 0,
+            "micro_window_repair_skipped": True,
+            "reused_chunk_files": [f.name for f in chunk_files],
+        }
     else:
         load_env_file()
         client = get_gemini_client(project_id=args.project, location=args.region)
 
-        _resolved_file = Path(__file__).resolve()
-        prompt_candidates = [
-            *([Path(args.prompt).expanduser().resolve()] if getattr(args, "prompt", None) else []),
-            Path(__file__).parent / "prompts" / "video_cut_prompt.md",
-            Path(__file__).parent.parent / "prompts" / "video_cut_prompt.md",
-            Path.cwd() / "prompts" / "video_cut_prompt.md",
-            Path(__file__).parent / "video-trimmer" / "prompts" / "video_cut_prompt.md",
-            *[p / "prompts" / "video_cut_prompt.md" for p in _resolved_file.parents[:5]],
-        ]
+        prompt_candidates = _video_cut_prompt_candidates(args)
 
         # Step 3a: Locate the active recording window when a reference script is provided on long footage
         win_start, win_end, active_units = 0.0, total_dur, whisper_units
@@ -304,6 +439,8 @@ def _run(args):
         logger.info("==> 4. Running %s [Mode: %s] with Whisper sentences for take arbitration...", args.model, mode_str)
 
         usage = {"prompt_tokens": 0, "candidates_tokens": 0, "thoughts_tokens": 0, "tool_use_tokens": 0, "total_tokens": 0}
+        assembly_usage = dict(usage)
+        assembly_dur = 0.0
         duration = 0.0
         chunk_edl_results = []
 
@@ -354,37 +491,19 @@ def _run(args):
                 (out_dir / f"{base_name}_{tag}_chunk{idx}_raw.txt").write_text(c_raw_json or "", encoding="utf-8")
                 chunk_edl_results.append(_parse_gemini_json_text(c_raw_json))
 
-            if len(chunk_edl_results) == 1:
-                model_edl = chunk_edl_results[0]
-            else:
-                model_edl = merge_chunked_edl(
-                    chunk_edl_results,
-                    project_title=f"{base_name} AI Video Trimmer ({tag})",
-                )
+            # Each chunk numbers timeline_position from 1: renumber across the project (chunk value kept)
+            model_edl = _merge_chunk_results(chunk_edl_results, project_title=f"{base_name} AI Video Trimmer ({tag})")
 
-            # Step 4a: Show Mode 全片組裝（純文字推論）：跨區段取捨、場外角色判定、段落標籤與順序
+            # Step 4a: Show Mode 全片組裝（純文字推論）：跨區段取捨、場外角色判定、段落標籤與順序。
+            # 失敗時以最精簡格式重試一次，仍失敗就降級為區段結果（不中止整支片）。
             if getattr(args, "assemble", False) and whisper_units:
-                a_prompt = build_assembly_prompt(
-                    prompt_candidates,
-                    chunk_edl_results,
-                    whisper_units,
-                    reference_script_path=reference_script_path,
-                    script_path=script_path,
+                model_edl, assembly_info, assembly_usage, assembly_dur = _run_show_assembly(
+                    args, client, chunk_edl_results, whisper_units, prompt_candidates,
+                    reference_script_path, script_path, out_dir, base_name, tag, video_path,
                 )
-                n_candidates = sum(len(ch.get("final_edl", [])) for ch in chunk_edl_results if isinstance(ch, dict))
-                a_raw_json, a_usage, a_dur = run_assembly_inference(
-                    client, types, args.model, a_prompt, n_candidates, len(whisper_units)
-                )
-                duration += a_dur
+                duration += assembly_dur
                 for k in usage:
-                    usage[k] += a_usage.get(k, 0)
-                (out_dir / f"{base_name}_{tag}_assembly_raw.json").write_text(a_raw_json, encoding="utf-8")
-                (out_dir / f"{base_name}_{tag}_chunks_raw.json").write_text(
-                    json.dumps(chunk_edl_results, ensure_ascii=False, indent=2), encoding="utf-8"
-                )
-                model_edl = normalize_assembled_edl(parse_assembly_json(a_raw_json), whisper_units, chunk_edl_results)
-                logger.info("    [全片組裝] 候選 %d -> 最終 %d clips（%.1f 秒）",
-                            n_candidates, len(model_edl.get("final_edl", [])), a_dur)
+                    usage[k] += assembly_usage.get(k, 0)
 
             # Step 4b: Pre-Render Semantic Audit & Surgical Micro-Window Repair (15s-90s windows)
             if whisper_units:
@@ -443,7 +562,17 @@ def _run(args):
             "total_tokens": usage["total_tokens"],
             "micro_window_repairs": len(micro_window_repairs),
         }
-        _append_usage_log(out_dir, video_path, args.model, usage, mode, duration)
+        if assembly_info is None:
+            _append_usage_log(out_dir, video_path, args.model, usage, mode, duration)
+        else:
+            # Assembly attempts are already logged one line each; log the rest so the lines add up to the total.
+            rest = {k: usage[k] - int(assembly_usage.get(k, 0) or 0) for k in usage}
+            _append_usage_log(out_dir, video_path, args.model, rest, mode, max(0.0, duration - assembly_dur),
+                              extra={"scope": "chunks_and_repairs"})
+
+    if assembly_info is not None:
+        inference_metrics["assembly_status"] = assembly_info["status"]
+        inference_metrics["assembly_tokens"] = assembly_info["usage"]
 
     # Layer 3 & Layer 4: Sub-unit word trimming, cross-clip coalescing, and acoustic onset snapping
     logger.info("==> 5. Running text-locked word boundary trimming and acoustic onset snapping...")
@@ -535,18 +664,16 @@ def _run(args):
 
         clip_role = "offscreen" if str(c.get("role", "host")).lower() == "offscreen" else "host"
         lock_audio = role_audio.get(clip_role, audio) if role_audio else audio
+        # 出點上限＝下一段聲音的聲學起音（含另一支麥克風的下一句），不是 Whisper 偏早的下一句起點；
+        # tail_pad（讓想法落地）也套同一個上限
+        other_audio = [a for r, a in role_audio.items() if r != clip_role] if role_audio else None
         tight_in, tight_out, clip_cps, in_m, out_m = refine_speech_bounds_locked(
             lock_audio, sr, t_first, t_last, total_dur, transcript=transcript, pacing=args.pacing,
-            prev_sentence_end=prev_sentence_end, next_sentence_start=next_sentence_start
+            prev_sentence_end=prev_sentence_end, next_sentence_start=next_sentence_start,
+            tail_pad=tail_pad, other_audio=other_audio,
         )
         if tight_out <= tight_in:
             tight_out = tight_in + 1.0
-        if tail_pad > 0.0:
-            # 讓想法落地：想法結束後多留一點尾音與停頓，但不跨進下一句的開口
-            limit = total_dur
-            if next_sentence_start is not None:
-                limit = min(limit, float(next_sentence_start) - 0.02)
-            tight_out = round(max(tight_out, min(limit, tight_out + tail_pad)), 2)
         dur = round(tight_out - tight_in, 2)
 
         refined_edl.append({
@@ -565,7 +692,9 @@ def _run(args):
             "whisper_transcript": su.get("whisper_transcript", transcript),
             "role": str(c.get("role", "host")).lower(),
             "segment": c.get("segment", ""),
-            "timeline_position": c.get("timeline_position"),
+            "timeline_position": c.get("timeline_position"),  # renumbered 1..N after sanitization
+            "chunk_index": c.get("chunk_index"),
+            "chunk_timeline_position": c.get("chunk_timeline_position"),
             "take_selection_reason": c.get("take_selection_reason", ""),
             "visual_check": c.get("visual_check", "Direct eye contact with camera, eyes open."),
             "audio_check": c.get("audio_check", f"Whisper locked (in_margin={in_m:.2f}s, out_margin={out_m:.2f}s)")
@@ -577,6 +706,11 @@ def _run(args):
 
     # Layer 5: Deterministic timeline sanitization and 8-dimension rough-cut quality audit
     refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur, allow_reorder=allow_reorder)
+    # The list order is the final timeline. One parent clip can expand into several sub-clips and chunk
+    # models number from 1, so timeline_position is renumbered here to stay unique (1..N) for consumers
+    # that sort by it. The chunk-local value stays in chunk_timeline_position.
+    for pos, c in enumerate(refined_edl, start=1):
+        c["timeline_position"] = pos
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
     avg_cps = round(sum(c["cps"] for c in refined_edl) / max(1, len(refined_edl)), 2)
     logger.info("    Retained clips: %d | Trimmed duration: %.1f s (~%.2f min) | Average CPS: %.2f chars/s",
@@ -620,10 +754,21 @@ def _run(args):
         extra_cli_flags=" ".join(show_mode_flags),
         repeats_as_warnings=bool(getattr(args, "repeats_as_warnings", False)),
     )
+    if assembly_info is not None:
+        audit_report["assembly"] = {k: v for k, v in assembly_info.items() if k != "attempts"}
+        audit_report["assembly"]["attempts"] = [
+            {k: a.get(k) for k in ("attempt", "format", "status", "finish_reason", "usage", "error")}
+            for a in assembly_info.get("attempts", [])
+        ]
+        if assembly_info.get("status") == STATUS_DEGRADED:
+            audit_report.setdefault("agent_verdict", {}).setdefault("warnings", []).insert(
+                0, _assembly_report_line(assembly_info))
     report_json_path = out_dir / f"{base_name}_{tag}_edl_report.json"
     report_md_path = out_dir / f"{base_name}_{tag}_edl_report.md"
     report_json_path.write_text(json.dumps(audit_report, ensure_ascii=False, indent=2), encoding="utf-8")
     generate_edl_audit_markdown(audit_report, report_md_path)
+    if assembly_info is not None:
+        _prepend_assembly_banner(report_md_path, assembly_info)
     verdict = audit_report["agent_verdict"]
     logger.info(
         "    [Quality Audit] Grade: %s | Pass Quality Gate: %s | Report: %s",
@@ -638,6 +783,7 @@ def _run(args):
         "pacing_style": "text_based_whisper_grounded",
         "agent_verdict": verdict,
         "inference_metrics": inference_metrics,
+        **({"assembly": audit_report["assembly"]} if assembly_info is not None else {}),
         "average_cps": avg_cps,
         "total_duration": total_out_dur,
         "final_edl": refined_edl
@@ -669,6 +815,8 @@ def _run(args):
     # so the summary goes to `_edl_summary.md` and never overwrites it.
     summary_path = out_dir / f"{base_name}_{tag}_edl_summary.md"
     generate_edl_report(refined_edl, total_dur, summary_path, base_name=f"{base_name} ({tag})")
+    if assembly_info is not None:
+        _prepend_assembly_banner(summary_path, assembly_info)
     logger.info("==> 10. Wrote Markdown clip summary: %s", summary_path.name)
 
     if getattr(args, "xml_only", False) or getattr(args, "no_render", False):
@@ -710,6 +858,9 @@ def main():
     parser.add_argument("--cached-json", default=None,
                         help="Path to an existing EDL JSON file to bypass cloud Gemini inference")
     parser.add_argument("--skip-whisper", action="store_true", help="Skip local Whisper transcription and use energy-only fallback")
+    parser.add_argument("--whisper-model", default=None,
+                        help="Whisper model: small / medium / large-v3 / large-v3-turbo, or an mlx Hugging Face repo "
+                             "(defaults to $WHISPER_MODEL or large-v3; mlx-whisper loads mlx-community/whisper-<model>-mlx)")
     parser.add_argument("--strict", action="store_true", help="Exit with code 2 after writing audit reports if agent_verdict.pass_quality_gate is False")
     parser.add_argument("--verbose", action="store_true", help="Enable verbose DEBUG-level logging")
     # Show Mode（節目型拍帶：主持人 + 場外聲音角色）。以下旗標預設全部關閉，不影響原有行為。
@@ -723,7 +874,12 @@ def main():
     show.add_argument("--analysis-video", default=None,
                       help="上傳與 Gemini 分析改用此代理檔（例如 1080p），Whisper 時間戳、聲學鎖定與 XML 仍以 -i 原檔為準")
     show.add_argument("--assemble", action="store_true",
-                      help="分段推論後再做一次純文字全片組裝：跨區段取捨、場外角色判定、段落標籤與順序")
+                      help="分段推論後再做一次純文字全片組裝：跨區段取捨、場外角色判定、段落標籤與順序。"
+                           "失敗時以最精簡格式重試一次，仍失敗就降級為各區段結果（報告會標明）")
+    show.add_argument("--reuse-chunks", default=None,
+                      help="重用既有區段結果（*_chunks_raw.json、*_chunk1_raw.txt 或只含一組區段結果的資料夾），"
+                           "不上傳影片、不重跑區段推論；配合 --assemble 只重跑全片組裝。沒有影片可重掃，略過 Micro-Window Repair。"
+                           "區段結果旁若有 <stem>_whisper_sentences.json，句子編號不一致時會中止")
     show.add_argument("--allow-reorder", action="store_true",
                       help="允許成片順序與原片時間順序不同（依 timeline_position），順序顛倒改為警告而非 fatal")
     show.add_argument("--xml-only", action="store_true", help="只輸出 JSON/CSV/XML/FCPXML 與審計報告，不渲染 MP4")

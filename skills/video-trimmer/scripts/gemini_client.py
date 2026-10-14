@@ -483,15 +483,21 @@ def merge_chunked_edl(chunk_edl_results: list[dict], project_title: str) -> dict
     Merge multiple chunk EDL results into a single project EDL.
 
     ASD-STE100:
-    This function combines clip lists from all chunks.
-    It renumbers clip IDs in chronological order.
+    This function combines clip lists from all chunks in pipeline order (chunk 1, chunk 2, ...).
+    It renumbers `clip_id` and `timeline_position` across the full project (1..N, unique).
+    Each chunk model numbers `timeline_position` from 1, so the chunk-local value moves to
+    `chunk_timeline_position` and the chunk number goes to `chunk_index`.
     """
     merged_clips = []
     clip_counter = 1
-    for chunk in chunk_edl_results:
-        for clip in chunk.get("final_edl", []):
+    for chunk_idx, chunk in enumerate(chunk_edl_results, start=1):
+        clips = chunk.get("final_edl", []) if isinstance(chunk, dict) else []
+        for clip in clips:
             clip_copy = dict(clip)
             clip_copy["clip_id"] = clip_counter
+            clip_copy.setdefault("chunk_index", chunk_idx)
+            clip_copy.setdefault("chunk_timeline_position", clip.get("timeline_position"))
+            clip_copy["timeline_position"] = clip_counter
             merged_clips.append(clip_copy)
             clip_counter += 1
 

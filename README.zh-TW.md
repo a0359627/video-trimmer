@@ -78,6 +78,7 @@ flowchart TD
 ```
 
 1. **第一層：純聲學與標點子句切分 (`transcribe.py`)**：
+   - Whisper 預設模型為 `large-v3`（可用 `--whisper-model small|medium|large-v3|...` 或 `$WHISPER_MODEL` 覆寫），以 `condition_on_previous_text=False` 解碼，避免長片段重複迴圈；中文逐字稿以 OpenCC `s2tw` 統一為繁體（`$WHISPER_ZH_CONVERT=none` 可關閉），時間戳不變。
    - 透過 Whisper 提取逐字時間戳，僅依據物理邊界切分 `Sentence ID`：換氣停頓（`gap >= 0.20s`）、吃螺絲拉長音起音（`word_dur >= 1.20s` 且單字元 `>= 0.45s`）、句尾標點與說話者輪替，同時保留微停頓（`gap < 0.25s`）下的連詞黏合（`CONJUNCTIONS`）。
    - **零 Python 語意猜測原則**：絕不在 Python 端使用字串相似度猜測 NG 重講，語意判斷 100% 交由 LLM 處理。
 2. **第二層：雙模式 LLM 語意擇優與局部微視窗精準重掃 (`gemini_client.py` / `edl_auditor.py`)**：
@@ -236,6 +237,8 @@ chmod +x setup.sh
 | `--prompt prompts/video_cut_prompt_show.md` | 節目型主提示詞：對得上腳本聲音角色、或主持人接著回應的場外提問／反應保留為獨立 `offscreen` clip（XML 名稱前綴 `[場外]`）；餵詞、流程指令、閒聊剔除。 |
 | `--reference-script` | Mode C：腳本只作結構參考，不做 Mode A 的單向消耗與覆蓋率閘門，脫稿但切題的內容保留。 |
 | `--assemble` | 分段推論後再做一次純文字全片組裝：跨區段取捨、段落標籤、成片順序。 |
+| `--reuse-chunks` | 搭配 `--assemble`：沿用既有的區段結果（`<stem>_<suffix>_chunk*_raw.txt`），只重跑全片組裝；不上傳、不重做區段推論。 |
+|  | 組裝輸出被截斷或格式錯誤時，先用精簡格式重試一次；仍失敗就降級為各區段結果（照原片順序、`timeline_position` 全片唯一），並在報告標明。原始輸出：`<stem>_<suffix>_assembly_raw.txt`、`_assembly_meta.json`。 |
 | `--allow-reorder` | 允許成片順序與原片不同；順序顛倒改為警告。 |
 | `--analysis-video` | 上傳與分析用代理檔（例如 1080p），Whisper、聲學鎖定與 XML 仍以原檔為準。 |
 | `--xml-only` | 不渲染 MP4。 |

@@ -67,12 +67,14 @@ video-trimmer/
    - Evaluates on-camera visual cues (camera gaze, mouth articulatory sync, body language) and audio acoustics (close lavalier mic vs distant room echo).
    - Accurately differentiates the on-screen target host from off-screen crew shouting section cues (e.g. "Action", "Scene 1", "Take 2") and casual blooper chatter between takes, eliminating cumbersome local diarization models while maintaining flawless role separation.
 4. **Word-Level Acoustic Ground Truth & Global Cross-Clip Coalescing**:
-   - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps segmented purely on physical breath pauses and punctuation closure.
+   - Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA) extracts phoneme-aligned word timestamps segmented purely on physical breath pauses and punctuation closure. Default model `large-v3` (`--whisper-model` or `$WHISPER_MODEL` overrides it; mlx loads `mlx-community/whisper-<model>-mlx`), decoded with `condition_on_previous_text=False` to prevent repetition loops on long recordings. Chinese text is normalized to Traditional Chinese with OpenCC `s2tw` (`$WHISPER_ZH_CONVERT=none` keeps the raw text); timestamps do not change. `<stem>_whisper_meta.json` records the model; a cache made with another model is reported.
    - Global Cross-Clip Coalescing (`coalesce_adjacent_sub_units`) automatically merges consecutive `Sentence ID`s across adjacent clips when `gap < 0.65s` (default; Show Mode `--keep-pause-sec` overrides it), eliminating artificial internal jump-cuts.
 5. **Acoustic Onset Snapping (Smart Gap Shortening)**:
    - Scans the pre-speech dead air to snap cut-ins precisely **80ms before vocal cord vibration**, eliminating awkward pre-speech dead air and post-slate pauses.
+   - First-word protection: falls back to just before the Whisper first-word start only when sound connected to the onset reaches back to it (soft first syllable). Silence, or a residual of the previous take separated by silence, keeps the acoustic onset.
 6. **Word Ground Truth Tail & Continuous Phonation Protection**:
    - Strictly enforces `true_speech_end >= t_last` with forward-only tracking down to ambient room noise.
+   - The cut-out limit is the acoustic onset of the next sound (minus 30 ms), not the Whisper next-sentence start, which runs early by about 0.2 s and often equals `t_last`. Whisper is used only when the speech continues into the next sentence without silence.
    - Continuous Phonation Invariant: When `tail_gap < 0.18s` (speaker in continuous speech flow), trailing words are never trimmed even if omitted from the prompt transcript, completely preserving trailing phonemes and words. Only explicit blooper tokens from the managed whitelist are pruned, or tail words that Whisper duplicated into the time range of the next sentence.
    - Accommodates voiceless consonant plosive closures (e.g. `/t/`, `/p/`, `/k/` stops) and soft trailing nasal vowels without clipping word endings.
 7. **20ms Audio Equal-Power Micro-Crossfade & Hardware-Accelerated Keyframe Rendering**:
@@ -160,6 +162,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--no-render` | | `False` | Skip the MP4 render (same as `--xml-only`). |
 | `--xml-profile` | | `premiere` | FCP7 XML flavour: `premiere` (Premiere Pro structure) or `davinci` (same structure, `xmeml v5`, camera timecode in `<file><timecode>` without `<frame>`). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
+| `--whisper-model` | | `large-v3` | Whisper model (`small`, `medium`, `large-v3`, `large-v3-turbo`, or an mlx Hugging Face repo). Defaults to `$WHISPER_MODEL` or `large-v3`. An existing `_whisper_raw.json` in the output directory is reused as is. |
 | `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
 | `--prompt` | | `None` | Show Mode: alternative master prompt file (e.g. `prompts/video_cut_prompt_show.md`). |
@@ -167,11 +170,12 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--offscreen-channel` | | `none` | Show Mode: `auto` / `left` / `right` mic channel of the off-screen voice; tags sentences `[HOST]` / `[OFFSCREEN]` / `[CUE]` and splits at role changes. |
 | `--analysis-video` | | `None` | Upload and analyse this proxy (e.g. 1080p) while Whisper, acoustic locking and XML use the `-i` original. |
 | `--assemble` | | `False` | Show Mode: text-only global assembly pass after chunk inference (cross-chunk take arbitration, segment labels, timeline order). |
+| `--reuse-chunks` | | `None` | With `--assemble`: reuse existing chunk results and rerun only the assembly (no upload, no chunk inference, no micro-window repair). The assembly output is compact (candidate ids, sentence ids, role, segment); fields are filled back locally. Truncated or invalid output → one compact retry → degrade to chunk results in source order with unique `timeline_position`, flagged in the report. Raw output and usage: `<stem>_<suffix>_assembly_raw.txt`, `_assembly_meta.json`, `usage_log.jsonl` (one line per assembly attempt). |
 | `--allow-reorder` | | `False` | Keep `timeline_position` order; out-of-order clips become a warning instead of a fatal violation. |
 | `--xml-only` | | `False` | Skip the MP4 render; still writes JSON, CSV, XML, FCPXML and the audit report. |
 | `--repeats-as-warnings` | | `False` | Show Mode: intra-clip repeated clauses (rhetorical "A, 還是 A", doubled phrases) are warnings instead of a fatal violation. |
 | `--keep-pause-sec` | | `None` | Show Mode: keep pauses inside a thought up to N seconds (one clip). Omitted = default tuning (sentence gap `0.65s`, word gap `0.70s`). Show recordings: `1.0`. |
-| `--tail-pad-sec` | | `0.0` | Show Mode: extra time after the last word of each clip; never crosses the next sentence onset. Show recordings: `0.25`. |
+| `--tail-pad-sec` | | `0.0` | Show Mode: extra time after the last word of each clip; never enters the next sound (acoustic onset on every microphone, not the early Whisper sentence start). Show recordings: `0.25`. |
 | `--transcribe-only` | | `False` | Stop after Whisper transcription and sentence merging (with role tags); no upload, no Gemini call. |
 
 ### Show Mode (host + off-screen voice role on a second microphone)

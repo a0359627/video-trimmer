@@ -78,7 +78,7 @@ flowchart TD
 ```
 
 1. **Layer 1 — Pure Acoustic & Punctuation Clause Segmentation (`transcribe.py`)**:
-   - Extracts phoneme-aligned word timestamps via Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA).
+   - Extracts phoneme-aligned word timestamps via Whisper (`mlx-whisper` on Apple Silicon Metal or `faster-whisper` on CPU/CUDA). The default model is `large-v3` (`--whisper-model small|medium|large-v3|...` or `$WHISPER_MODEL` overrides it), decoded with `condition_on_previous_text=False` to prevent repetition loops on long recordings. Chinese text is normalized to Traditional Chinese with OpenCC `s2tw` (`$WHISPER_ZH_CONVERT=none` disables it); timestamps do not change.
    - Splits `Sentence ID` units purely on physical boundaries: breath pauses (`gap >= 0.20 s`), stretched word onsets (`word_dur >= 1.20 s` and `>= 0.45 s/char`), punctuation closure, and speaker turns, while preserving conjunction attachment (`CONJUNCTIONS`) across micro-pauses (`gap < 0.25 s`).
    - Enforces a strict **Zero Python String-Similarity Rule**: Python never guesses semantic retakes via character overlap; semantic arbitration belongs exclusively to the LLM.
 2. **Layer 2 — Dual-Mode LLM Take Arbitration & Surgical Micro-Window Repair (`gemini_client.py` / `edl_auditor.py`)**:
@@ -254,6 +254,8 @@ Use Show Mode when the director performs the script's voice role (questions, rea
 | `--prompt prompts/video_cut_prompt_show.md` | Show master prompt: off-screen lines matching the script's voice role, or answered by the host, become separate `offscreen` clips (XML names prefixed `[場外]`); fed lines, directions and chatter are dropped. |
 | `--reference-script` | Mode C: the script is structural reference only, without Mode A monotonic consumption or the coverage gate, so on-topic improvisation survives. |
 | `--assemble` | Text-only global assembly pass after chunk inference: cross-chunk take arbitration, segment labels, timeline order. |
+| `--reuse-chunks` | With `--assemble`: reuse existing chunk results (`<stem>_<suffix>_chunk*_raw.txt`) and rerun only the assembly; no upload, no chunk inference. |
+|  | If the assembly output is truncated or invalid it retries once with the compact format, then degrades to the chunk results in source order (unique `timeline_position`), flagged in the report. Raw output: `<stem>_<suffix>_assembly_raw.txt`, `_assembly_meta.json`. |
 | `--allow-reorder` | Keep the assembled order; out-of-order clips become a warning. |
 | `--analysis-video` | Upload and analyse a proxy (e.g. 1080p) while Whisper, acoustic locking and XML use the original. |
 | `--xml-only` | Skip the MP4 render. |

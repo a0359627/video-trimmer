@@ -78,6 +78,7 @@ flowchart TD
 ```
 
 1. **계층 1: 순수 음향 및 구두점 기반 절 분할 (`transcribe.py`)**:
+   - Whisper 기본 모델은 `large-v3`입니다(`--whisper-model small|medium|large-v3|...` 또는 `$WHISPER_MODEL`로 변경). 긴 녹화의 반복 루프를 막기 위해 `condition_on_previous_text=False`로 디코딩합니다. 중국어 텍스트는 OpenCC `s2tw`로 번체자로 통일합니다(`$WHISPER_ZH_CONVERT=none`으로 비활성화). 타임스탬프는 바뀌지 않습니다.
    - 호흡 휴지(`gap >= 0.20s`), 발화 지연 장음(`word_dur >= 1.20s`), 문장 부호 종결, 화자 교체의 물리적 경계만으로 `Sentence ID`를 분할하며, 미세 휴지(`gap < 0.25s`) 구간의 접속사 결합(`CONJUNCTIONS`)을 보존합니다. Python 문자열 유사도를 통한 의미 추측을 완전히 배제합니다.
 2. **계층 2: 듀얼 모드 LLM 테이크 중재 및 국소 마이크로 윈도우 재스캔 (`gemini_client.py` / `edl_auditor.py`)**:
    - **Mode A: 대본 기반 단조 정렬 (촬영 대본 제공 시)**: 단일 진실 공급원(SSOT) 파서(`extract_script_blocks`)를 통해 YAML 프론트매터, 무대 지시문 및 비발화 메타데이터 헤더(`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：` 등)를 제외하고 `[Script Block 01] .. [Script Block NN]`으로 구성하여 프롬프트와 감사기 간 번호를 100% 일치시키며 블록당 최대 1개의 최종 성공 테이크만 유지합니다(`Last-Take-Wins`).
@@ -196,6 +197,7 @@ Antigravity에서는 다음 두 가지 방식으로 **Video Trimmer**를 사용�
 | `--prompt prompts/video_cut_prompt_show.md` | 쇼 전용 프롬프트. 대본의 목소리 역할과 일치하거나 진행자가 대답하는 화면 밖 질문·리액션은 별도 `offscreen` 클립으로 유지(XML 이름 접두사 `[場外]`), 대사 불러주기·지시·잡담은 제외. |
 | `--reference-script` | Mode C: 대본은 구조 참고용. Mode A의 단방향 소비와 커버리지 게이트 없음. |
 | `--assemble` | 청크 추론 후 텍스트 전용 전체 조립: 청크 간 테이크 선택, 섹션 라벨, 타임라인 순서. |
+| `--reuse-chunks` | With `--assemble`: reuse existing chunk results and rerun only the assembly (no upload). On truncated/invalid output it retries once with a compact format, then degrades to chunk results in source order (unique `timeline_position`). |
 | `--allow-reorder` | 조립 순서 유지. 순서 역전은 경고로만 처리. |
 | `--analysis-video` | 업로드와 분석에 프록시(예: 1080p) 사용. Whisper, 음향 고정, XML은 원본 기준. |
 | `--xml-only` | MP4 렌더링 생략. |

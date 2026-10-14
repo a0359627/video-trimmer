@@ -78,6 +78,7 @@ flowchart TD
 ```
 
 1. **レイヤー 1：純音響・句読点ベースの節分割 (`transcribe.py`)**：
+   - Whisper の既定モデルは `large-v3` です（`--whisper-model small|medium|large-v3|...` または `$WHISPER_MODEL` で変更可能）。長尺収録での繰り返しループを防ぐため `condition_on_previous_text=False` でデコードします。中国語テキストは OpenCC `s2tw` で繁体字に統一します（`$WHISPER_ZH_CONVERT=none` で無効化）。タイムスタンプは変わりません。
    - 息継ぎ休止（`gap >= 0.20s`）、言い淀みによる長音化（`word_dur >= 1.20s`）、句読点閉鎖、および話者交替の物理境界のみで `Sentence ID` を分割し、微細休止（`gap < 0.25s`）を跨ぐ接続詞結合（`CONJUNCTIONS`）を保持します。Python 側の文字列類似度によるリテイク推測は一切行いません。
 2. **レイヤー 2：デュアルモード LLM テイク選定＆局所マイクロウィンドウ再スキャン (`gemini_client.py` / `edl_auditor.py`)**：
    - **Mode A：スクリプトアンカー単調アライメント（台本指定時）**：単一情報源（SSOT）パーサー（`extract_script_blocks`）により YAML フロントマター、ト書き、非発話メタデータ行（`Title:`, `Subject:`, `Outline:`, `標題：`, `主題：`, `內文：` など）を除外して `[Script Block 01] .. [Script Block NN]` に整形し、プロンプトと監査器の間で 100% 番号を一致させ、各ブロック最大 1 つの最終成功テイクのみを採用します（`Last-Take-Wins`）。
@@ -196,6 +197,7 @@ Antigravity では、以下の 2 つの方法で **Video Trimmer** を操作で�
 | `--prompt prompts/video_cut_prompt_show.md` | 番組用プロンプト。台本の声の役に一致する、または司会者が応答する画面外の質問・リアクションは独立した `offscreen` クリップとして保持（XML 名は `[場外]` 接頭辞）。台詞の先読み、指示、雑談は除外。 |
 | `--reference-script` | Mode C：台本は構成の参考のみ。Mode A の単方向消費とカバレッジゲートは無効。 |
 | `--assemble` | チャンク推論後にテキストのみの全体アセンブリを実行：チャンク間のテイク裁定、セクション名、タイムライン順。 |
+| `--reuse-chunks` | With `--assemble`: reuse existing chunk results and rerun only the assembly (no upload). On truncated/invalid output it retries once with a compact format, then degrades to chunk results in source order (unique `timeline_position`). |
 | `--allow-reorder` | アセンブリ順を維持。順序の入れ替わりは警告扱い。 |
 | `--analysis-video` | アップロードと解析にプロキシ（例：1080p）を使用。Whisper、音響ロック、XML は元ファイル基準。 |
 | `--xml-only` | MP4 をレンダリングしない。 |
