@@ -39,8 +39,11 @@ def format_path_for_fcp7(system_path):
 
 
 def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=1920, height=1080, fps=23.976,
-                      audio_channels=None, markers=None):
+                      audio_channels=None, markers=None, audio_layout="stereo"):
     """產生 Premiere Pro / DaVinci Resolve 相容的 FCP 7 XML (xmeml v4)。
+
+    audio_layout: "stereo"（預設）把雙聲道來源寫成 Premiere 的 exploded stereo 配對，匯入後是一條
+    立體聲軌、左右與原始拍帶相同；"mono" 則每個聲道各一條單聲道音軌，方便個別關閉或調音量。
 
     結構比照 Premiere Pro 自己匯出的 FCP7 XML：sequence 有 duration 與 timecode、file 有完整
     media 描述（video/audio samplecharacteristics、channelcount）、每個聲道一條音軌並帶
@@ -202,11 +205,34 @@ def generate_fcp7_xml(edl, video_path, total_source_dur, output_xml_path, width=
         '        </format>',
     ]
 
+    # Premiere Pro convention for a stereo source: the two channels are written as two "exploded"
+    # tracks tagged premiereTrackType="Stereo" (currentExplodedTrackIndex 0/1, totalExplodedTrackCount 2)
+    # and each clipitem carries premiereChannelType="stereo"; on import Premiere folds them back into
+    # ONE stereo track whose clips keep the original L/R, exactly like the raw footage.
+    stereo_pair = (audio_layout == "stereo" and channels == 2)
+    if stereo_pair:
+        x += [
+            '        <outputs>',
+            '          <group>',
+            '            <index>1</index>',
+            '            <numchannels>2</numchannels>',
+            '            <downmix>0</downmix>',
+            '            <channel><index>1</index></channel>',
+            '            <channel><index>2</index></channel>',
+            '          </group>',
+            '        </outputs>',
+        ]
+
     for ch in range(1, channels + 1):
-        x += ['        <track>']
+        if stereo_pair:
+            x += [f'        <track currentExplodedTrackIndex="{ch - 1}" totalExplodedTrackCount="2" premiereTrackType="Stereo">']
+        else:
+            x += ['        <track>']
+        clipitem_open = (f'          <clipitem id="clipitem-a{ch}-{{idx}}" premiereChannelType="stereo">' if stereo_pair
+                         else f'          <clipitem id="clipitem-a{ch}-{{idx}}">')
         for idx, (clip, (in_f, out_f, start_f, end_f)) in enumerate(zip(edl, placements), start=1):
             x += [
-                f'          <clipitem id="clipitem-a{ch}-{idx}">',
+                clipitem_open.format(idx=idx),
                 '            <masterclipid>masterclip-1</masterclipid>',
                 f'            <name>{clip_name(clip)}</name>',
                 '            <enabled>TRUE</enabled>',

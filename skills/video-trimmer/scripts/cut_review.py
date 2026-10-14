@@ -424,6 +424,8 @@ def main(argv=None) -> int:
     parser.add_argument("--gemini", action="store_true", help="執行 Gemini 連貫性評讀（純文字，不上傳影片）")
     parser.add_argument("--model", default=None)
     parser.add_argument("--xml-out", default=None, help="寫出帶 marker 的 FCP7 XML")
+    parser.add_argument("--audio-layout", choices=["stereo", "mono"], default="stereo",
+                        help="XML 音軌寫法：stereo（預設）一條立體聲軌；mono 每聲道一軌")
     parser.add_argument("--width", type=int, default=3840)
     parser.add_argument("--height", type=int, default=2160)
     args = parser.parse_args(argv)
@@ -488,7 +490,8 @@ def main(argv=None) -> int:
         except Exception:  # noqa: BLE001
             pass
         markers.sort(key=lambda m: m["frame"])
-        generate_fcp7_xml(edl, Path(args.video), total_dur, Path(args.xml_out), args.width, args.height, fps, markers=markers)
+        generate_fcp7_xml(edl, Path(args.video), total_dur, Path(args.xml_out), args.width, args.height, fps,
+                          markers=markers, audio_layout=args.audio_layout)
         logger.info("帶 %d 個 marker 的 XML: %s", len(markers), args.xml_out)
     logger.info("接點檢查: %d 個 clip 需確認 -> %s", len(records), out_dir / "cut_review.md")
     return 0

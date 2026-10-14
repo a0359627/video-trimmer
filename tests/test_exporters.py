@@ -49,6 +49,28 @@ class TestGenerateFcp7Xml(unittest.TestCase):
             assert audio_clip.find("sourcetrack/trackindex").text == "1"
             assert audio_clip.find("link/linkclipref").text == "clipitem-v1"
 
+    def test_stereo_layout_uses_premiere_exploded_pair_and_mono_does_not(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_path = Path(tmp)
+            video_path = tmp_path / "take1.mp4"
+            video_path.write_bytes(b"")
+            stereo_xml = tmp_path / "stereo.xml"
+            mono_xml = tmp_path / "mono.xml"
+            generate_fcp7_xml(_sample_edl(), video_path, total_source_dur=30.0, output_xml_path=stereo_xml,
+                               width=1920, height=1080, fps=24.0, audio_channels=2)
+            generate_fcp7_xml(_sample_edl(), video_path, total_source_dur=30.0, output_xml_path=mono_xml,
+                               width=1920, height=1080, fps=24.0, audio_channels=2, audio_layout="mono")
+            s = ET.parse(stereo_xml).getroot()
+            tracks = s.findall(".//audio/track")
+            assert [t.get("premiereTrackType") for t in tracks] == ["Stereo", "Stereo"]
+            assert [t.get("currentExplodedTrackIndex") for t in tracks] == ["0", "1"]
+            assert all(c.get("premiereChannelType") == "stereo" for c in s.findall(".//audio//clipitem"))
+            assert s.find(".//audio/outputs/group/numchannels").text == "2"
+            assert [t.findtext("outputchannelindex") for t in tracks] == ["1", "2"]
+            m = ET.parse(mono_xml).getroot()
+            assert all(t.get("premiereTrackType") is None for t in m.findall(".//audio/track"))
+            assert m.find(".//audio/outputs") is None
+
     def test_sequence_markers_are_written_and_escaped(self):
         with tempfile.TemporaryDirectory() as tmp:
             tmp_path = Path(tmp)

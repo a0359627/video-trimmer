@@ -605,7 +605,8 @@ def _run(args):
     logger.info("==> 7. 輸出表格清單: %s", csv_path.name)
 
     xml_path = out_dir / f"{base_name}_{tag}_edl.xml"
-    generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps)
+    generate_fcp7_xml(refined_edl, video_path, total_dur, xml_path, width, height, fps,
+                      audio_layout=getattr(args, "audio_layout", "stereo") or "stereo")
     logger.info("==> 8. 輸出通用剪輯工程檔: %s", xml_path.name)
 
     fcpxml_path = out_dir / f"{base_name}_{tag}_edl.fcpxml"
@@ -670,6 +671,8 @@ def main():
                       help="想法內部可保留的停頓上限（秒）；小於此值的停頓不切開、連續句子合併成一個 clip。預設 0.40，節目型建議 1.0")
     show.add_argument("--tail-pad-sec", type=float, default=0.0,
                       help="每個 clip 尾字之後多留的時間（秒），讓想法落地；不會跨進下一句開口。預設 0，節目型建議 0.25")
+    show.add_argument("--audio-layout", choices=["stereo", "mono"], default="stereo",
+                      help="XML 音軌寫法：stereo（預設）與原始拍帶相同的一條立體聲軌；mono 則每個聲道各一條單聲道軌")
     show.add_argument("--transcribe-only", action="store_true",
                       help="只做 Whisper 轉錄與句子合併（含角色標籤）後結束，不上傳也不呼叫 Gemini")
     args = parser.parse_args()
