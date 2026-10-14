@@ -13,6 +13,7 @@ import math
 import os
 import re
 import subprocess
+import time
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
@@ -445,14 +446,108 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
     return final_sentences
 
 
+DEFAULT_WHISPER_MODEL = "large-v3"
+
+# Decode each 30 s window without the previous window's text as prompt. With the prompt, large-v3 fell into
+# repetition loops on long recordings (one line repeated 7 times over 25 s, real sentences lost, zero-length
+# word timestamps); without it the same span decodes correctly and about 18% faster.
+WHISPER_CONDITION_ON_PREVIOUS_TEXT = False
+
+# mlx-community repository names that do not follow the "whisper-<model>-mlx" pattern.
+_MLX_REPO_OVERRIDES = {
+    "large-v3-turbo": "mlx-community/whisper-large-v3-turbo",
+    "turbo": "mlx-community/whisper-large-v3-turbo",
+}
+
+
+def resolve_whisper_model(model_name: str | None = None) -> str:
+    """Return the Whisper model name: the argument, else $WHISPER_MODEL, else DEFAULT_WHISPER_MODEL (large-v3)."""
+    return str(model_name or os.environ.get("WHISPER_MODEL") or DEFAULT_WHISPER_MODEL).strip()
+
+
+def mlx_whisper_repo(model_name: str) -> str:
+    """Map a Whisper model name (small / medium / large-v3 ...) to its mlx-community repository.
+
+    A value that contains "/" is a Hugging Face repository or a local model directory and is used as is.
+    """
+    if "/" in model_name:
+        return model_name
+    return _MLX_REPO_OVERRIDES.get(model_name, f"mlx-community/whisper-{model_name}-mlx")
+
+
+def _whisper_meta_path(out_json: Path, video_stem: str) -> Path:
+    return out_json.parent / f"{video_stem}_whisper_meta.json"
+
+
+# Characters that Taiwan usage keeps, but the OpenCC s2tw table changes (for example 台 -> 臺).
+_ZH_KEEP_CHARS = frozenset("台")
+
+
+def _zh_script_converter():
+    """
+    Return an OpenCC converter for the Whisper Chinese text, or None.
+
+    ASD-STE100:
+    large-v3 mixes Simplified and Traditional characters in one file (language="zh" does not set the script).
+    The text is converted to Traditional Chinese (Taiwan, OpenCC "s2tw") so that Layer 1 punctuation and
+    conjunction rules, the Gemini prompt and the transcript alignment use one script. Timestamps do not change.
+    $WHISPER_ZH_CONVERT selects another OpenCC configuration, or "none" to keep the Whisper text.
+    """
+    mode = (os.environ.get("WHISPER_ZH_CONVERT") or "s2tw").strip()
+    if mode.lower() in ("none", "off", "0"):
+        return None
+    try:
+        import opencc
+    except ImportError:
+        logger.warning("    [Whisper] OpenCC is not installed: the transcript can mix Simplified and Traditional "
+                       "characters (pip install opencc).")
+        return None
+    for cfg in (mode, f"{mode}.json"):
+        try:
+            return opencc.OpenCC(cfg)
+        except Exception:  # noqa: BLE001  (configuration names differ between OpenCC releases)
+            continue
+    logger.warning("    [Whisper] OpenCC configuration %s is not available; the Whisper text is not converted.", mode)
+    return None
+
+
+def _convert_zh_text(text: str, converter) -> str:
+    if not text or converter is None:
+        return text
+    out = converter.convert(text)
+    if len(out) == len(text):
+        out = "".join(src if src in _ZH_KEEP_CHARS else dst for src, dst in zip(text, out))
+    return out
+
+
+def normalize_whisper_script(raw_results: list[dict]) -> int:
+    """Convert segment and word text of raw Whisper results in place (see _zh_script_converter). Return the changed word count."""
+    converter = _zh_script_converter()
+    if converter is None:
+        return 0
+    changed = 0
+    for seg in raw_results:
+        seg["text"] = _convert_zh_text(seg.get("text", ""), converter)
+        for w in seg.get("words", []) or []:
+            new_w = _convert_zh_text(w.get("word", ""), converter)
+            if new_w != w.get("word", ""):
+                changed += 1
+                w["word"] = new_w
+    return changed
+
+
 def transcribe_video_whisper(
     video_path,
     out_json_path,
-    model_name="small",
+    model_name=None,
     offscreen_channel=None,
 ):
     """
     Extract word-level acoustic ground-truth timestamps via Whisper and group them into Sentence IDs.
+
+    model_name: Whisper model (small / medium / large-v3 ...). None uses $WHISPER_MODEL or large-v3.
+    mlx-whisper (Apple Silicon) loads the matching mlx-community repository; faster-whisper uses the
+    same name. The model name and the transcription time go to <stem>_whisper_meta.json next to the cache.
 
     offscreen_channel (Show Mode): "left" / "right" / "auto" tags every word as HOST / OFFSCREEN / CUE
     from the two-microphone channel energy and splits sentences at role changes.
@@ -464,12 +559,31 @@ def transcribe_video_whisper(
     video_path = Path(video_path)
     out_json = Path(out_json_path)
     sentences_json = out_json.parent / f"{video_path.stem}_whisper_sentences.json"
+    model_name = resolve_whisper_model(model_name)
+    meta_json = _whisper_meta_path(out_json, video_path.stem)
 
     raw_results = []
     if out_json.exists():
         logger.info("Loading cached Whisper word timestamps: %s", out_json.name)
         with open(out_json, "r", encoding="utf-8") as f:
             raw_results = json.load(f)
+        cached_model = None
+        if meta_json.exists():
+            try:
+                cached_model = json.loads(meta_json.read_text(encoding="utf-8")).get("model")
+            except (OSError, ValueError):
+                cached_model = None
+        if cached_model is None:
+            logger.warning("    [Whisper Cache] %s has no model record (older cache). It is used as is; the requested "
+                           "model (%s) is not applied. To transcribe again, use a new --output-dir.", out_json.name, model_name)
+        elif cached_model != model_name:
+            logger.warning("    [Whisper Cache] %s was made with model %s. It is used as is; the requested model (%s) "
+                           "is not applied. To transcribe again, use a new --output-dir.",
+                           out_json.name, cached_model, model_name)
+        # Older caches (and caches made without OpenCC) can hold Simplified characters
+        n_conv = normalize_whisper_script(raw_results)
+        if n_conv:
+            logger.info("    [Whisper] Converted %d cached words to Traditional Chinese (OpenCC).", n_conv)
     elif HAS_WHISPER:
         temp_wav = out_json.parent / f"temp_{video_path.stem}_whisper.wav"
         subprocess.run([
@@ -477,10 +591,14 @@ def transcribe_video_whisper(
             "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)
         ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
+        t_start = time.monotonic()
         if HAS_MLX_WHISPER:
-            logger.info("Running mlx-whisper (%s) [Apple Silicon Metal GPU] for word-level transcription...", model_name)
-            mlx_repo = f"mlx-community/whisper-{model_name}-mlx"
-            res = mlx_whisper.transcribe(str(temp_wav), path_or_hf_repo=mlx_repo, word_timestamps=True, language="zh")
+            backend = "mlx-whisper"
+            mlx_repo = mlx_whisper_repo(model_name)
+            logger.info("Running mlx-whisper (%s, %s) [Apple Silicon Metal GPU] for word-level transcription...",
+                        model_name, mlx_repo)
+            res = mlx_whisper.transcribe(str(temp_wav), path_or_hf_repo=mlx_repo, word_timestamps=True, language="zh",
+                                         condition_on_previous_text=WHISPER_CONDITION_ON_PREVIOUS_TEXT)
             for i, s in enumerate(res.get("segments", [])):
                 words_data = []
                 for w in s.get("words", []):
@@ -497,9 +615,10 @@ def transcribe_video_whisper(
                     "words": words_data
                 })
         else:
-            # faster-whisper (Windows / Linux): default to large-v3 for Chinese accuracy (override with WHISPER_MODEL).
+            # faster-whisper (Windows / Linux): same model name as mlx (default large-v3 for Chinese accuracy).
             # Use CUDA float16 when an NVIDIA GPU is present; fall back to CPU int8 on any failure.
-            fw_model = os.environ.get("WHISPER_MODEL") or "large-v3"
+            backend = "faster-whisper"
+            fw_model = model_name
             fw_device = os.environ.get("WHISPER_DEVICE") or "auto"
             segments = None
             attempts = [("cuda", "float16"), ("cpu", "int8")] if fw_device in ("auto", "cuda") else [("cpu", "int8")]
@@ -508,7 +627,8 @@ def transcribe_video_whisper(
                 try:
                     logger.info("Running faster-whisper (%s, %s/%s) for word-level transcription...", fw_model, dev, ctype)
                     model = WhisperModel(fw_model, device=dev, compute_type=ctype)
-                    seg_iter, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
+                    seg_iter, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh",
+                                                   condition_on_previous_text=WHISPER_CONDITION_ON_PREVIOUS_TEXT)
                     segments = list(seg_iter)  # Force evaluation here so missing CUDA DLLs raise inside the try
                     break
                 except Exception as e:  # noqa: BLE001
@@ -534,11 +654,23 @@ def transcribe_video_whisper(
                     "words": words_data
                 })
 
+        elapsed = round(time.monotonic() - t_start, 1)
         temp_wav.unlink(missing_ok=True)
+        n_conv = normalize_whisper_script(raw_results)
+        if n_conv:
+            logger.info("    [Whisper] Converted %d words to Traditional Chinese (OpenCC).", n_conv)
 
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(raw_results, f, ensure_ascii=False, indent=2)
-        logger.info("Whisper transcription complete (%d raw segments).", len(raw_results))
+        meta_json.write_text(json.dumps({
+            "model": model_name,
+            "backend": backend,
+            "repo": mlx_whisper_repo(model_name) if backend == "mlx-whisper" else model_name,
+            "transcribe_seconds": elapsed,
+            "condition_on_previous_text": WHISPER_CONDITION_ON_PREVIOUS_TEXT,
+        }, ensure_ascii=False, indent=2), encoding="utf-8")
+        logger.info("Whisper transcription complete (%d raw segments, model %s, %.1f s).",
+                    len(raw_results), model_name, elapsed)
     else:
         logger.info("[Notice] Neither mlx-whisper nor faster-whisper is installed. Skipping local Whisper transcription.")
         return [], []

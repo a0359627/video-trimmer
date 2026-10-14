@@ -14,4 +14,7 @@ mlx-whisper>=0.4.0; sys_platform == 'darwin'
 # For CPU / CUDA / general platforms:
 faster-whisper>=1.0.0
 
+# Chinese script normalization of the Whisper text (large-v3 mixes Simplified and Traditional characters)
+opencc>=1.1.0
+
 

@@ -352,3 +352,103 @@ class TestTrimCrossClipSeamOverlaps(unittest.TestCase):
         # Snaps to the second repeated take at 23.0s
         self.assertAlmostEqual(trimmed[0]["t_first"], 23.0, places=1)
         self.assertEqual(trimmed[0]["transcript"], "另一家是來自新竹的團隊")
+
+
+class TestWhisperModelSelection(unittest.TestCase):
+    """Whisper model choice (default large-v3, --whisper-model / $WHISPER_MODEL) and the cache model record."""
+
+    def setUp(self):
+        import os
+        self._env = os.environ.pop("WHISPER_MODEL", None)
+
+    def tearDown(self):
+        import os
+        if self._env is not None:
+            os.environ["WHISPER_MODEL"] = self._env
+
+    def test_default_model_is_large_v3(self):
+        from scripts.transcribe import resolve_whisper_model
+        self.assertEqual(resolve_whisper_model(None), "large-v3")
+
+    def test_argument_overrides_environment(self):
+        import os
+        from unittest import mock
+        from scripts.transcribe import resolve_whisper_model
+        with mock.patch.dict(os.environ, {"WHISPER_MODEL": "medium"}):
+            self.assertEqual(resolve_whisper_model(None), "medium")
+            self.assertEqual(resolve_whisper_model("small"), "small")
+
+    def test_mlx_repository_mapping(self):
+        from scripts.transcribe import mlx_whisper_repo
+        self.assertEqual(mlx_whisper_repo("small"), "mlx-community/whisper-small-mlx")
+        self.assertEqual(mlx_whisper_repo("large-v3"), "mlx-community/whisper-large-v3-mlx")
+        self.assertEqual(mlx_whisper_repo("large-v3-turbo"), "mlx-community/whisper-large-v3-turbo")
+        self.assertEqual(mlx_whisper_repo("my-org/my-whisper"), "my-org/my-whisper")
+
+    def test_mlx_transcription_uses_large_v3_and_keeps_word_timestamp_format(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from unittest import mock
+        from scripts import transcribe as T
+
+        # Shape of an mlx-whisper result with word_timestamps=True (large-v3 and small use the same format)
+        fake_result = {"segments": [{
+            "start": 1.0, "end": 2.2, "text": " 你好世界",
+            "words": [{"word": " 你好", "start": 1.0, "end": 1.48, "probability": 0.9},
+                      {"word": "世界", "start": 1.48, "end": 2.2, "probability": 0.8}],
+        }]}
+        calls = {}
+
+        def fake_transcribe(path, **kwargs):
+            calls.update(kwargs)
+            return fake_result
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_json = Path(tmp) / "raw_footage_whisper_raw.json"
+            with mock.patch.object(T, "HAS_WHISPER", True), mock.patch.object(T, "HAS_MLX_WHISPER", True), \
+                    mock.patch.object(T, "mlx_whisper", mock.Mock(transcribe=fake_transcribe), create=True), \
+                    mock.patch.object(T.subprocess, "run"):
+                raw, sentences = T.transcribe_video_whisper(Path(tmp) / "raw_footage.mp4", out_json)
+            meta = json.loads((Path(tmp) / "raw_footage_whisper_meta.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(calls["path_or_hf_repo"], "mlx-community/whisper-large-v3-mlx")
+        self.assertTrue(calls["word_timestamps"])
+        self.assertFalse(calls["condition_on_previous_text"], "no previous-text prompt (repetition loops)")
+        self.assertEqual(meta["model"], "large-v3")
+        self.assertEqual(meta["backend"], "mlx-whisper")
+        self.assertEqual(raw[0]["words"][0], {"word": "你好", "start": 1.0, "end": 1.48})
+        self.assertEqual(len(sentences), 1)
+        self.assertAlmostEqual(sentences[0]["words"][-1]["end"], 2.2)
+
+    def test_cache_from_another_model_is_reported(self):
+        import json
+        import tempfile
+        from pathlib import Path
+        from scripts import transcribe as T
+
+        with tempfile.TemporaryDirectory() as tmp:
+            out_json = Path(tmp) / "raw_footage_whisper_raw.json"
+            out_json.write_text(json.dumps([{"id": 1, "start": 0.0, "end": 1.0, "text": "你好",
+                                             "words": [{"word": "你好", "start": 0.0, "end": 1.0}]}]),
+                                encoding="utf-8")
+            (Path(tmp) / "raw_footage_whisper_meta.json").write_text(json.dumps({"model": "small"}), encoding="utf-8")
+            with self.assertLogs("scripts.transcribe", level="WARNING") as logs:
+                raw, _ = T.transcribe_video_whisper(Path(tmp) / "raw_footage.mp4", out_json, model_name="large-v3")
+        self.assertEqual(len(raw), 1)
+        self.assertTrue(any("small" in m and "large-v3" in m for m in logs.output))
+
+    def test_simplified_whisper_text_is_converted_to_traditional(self):
+        try:
+            import opencc  # noqa: F401
+        except ImportError:
+            self.skipTest("OpenCC is not installed")
+        from scripts.transcribe import normalize_whisper_script
+        raw = [{"id": 1, "start": 0.0, "end": 1.6, "text": "帝国饭店 台湾",
+                "words": [{"word": "帝国", "start": 0.0, "end": 0.4}, {"word": "饭店", "start": 0.4, "end": 0.8},
+                          {"word": "台湾", "start": 1.0, "end": 1.6}]}]
+        changed = normalize_whisper_script(raw)
+        self.assertEqual(changed, 3)
+        self.assertEqual([w["word"] for w in raw[0]["words"]], ["帝國", "飯店", "台灣"])
+        self.assertEqual(raw[0]["words"][1]["start"], 0.4, "timestamps do not change")
+        self.assertEqual(normalize_whisper_script(raw), 0, "Traditional text stays as is")
