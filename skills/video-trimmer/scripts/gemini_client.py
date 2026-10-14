@@ -115,7 +115,8 @@ def _unique_raw_blob_name(local_path: Path) -> str:
     return f"raw/{local_path.name}"
 
 
-def stage_video_to_gcs(video_source: Path | str, bucket_name: str, gcs_client=None) -> tuple[str, str, bool]:
+def stage_video_to_gcs(video_source: Path | str, bucket_name: str, gcs_client=None,
+                       already_proxy: bool = False) -> tuple[str, str, bool]:
     """
     Stage a local video file to GCS for Vertex AI multimodal inference.
 
@@ -137,17 +138,20 @@ def stage_video_to_gcs(video_source: Path | str, bucket_name: str, gcs_client=No
             "Pass --bucket <bucket_name> or set VIDEO_TRIMMER_BUCKET=<bucket_name> in .env."
         )
 
-    # AI proxy: Vertex AI rejects video uploads above 2.0 GB. Reuse <stem>_ai_proxy.mp4 next to the source,
-    # or create a 540p proxy when the source exceeds 1.8 GB. Whisper, acoustic locking and XML keep the original.
+    # AI proxy: the original (master) never goes to the cloud. Reuse <stem>_ai_proxy.mp4 next to the source,
+    # or create a 540p proxy (any source size). Whisper, acoustic locking and XML keep the original.
+    # Pass --analysis-video to upload a specific proxy instead.
     upload_target = video_path
     file_size_gb = video_path.stat().st_size / (1024 * 1024 * 1024)
     proxy_candidate = video_path.parent / f"{video_path.stem}_ai_proxy.mp4"
-    if proxy_candidate.exists() and proxy_candidate.stat().st_size > 0:
+    if already_proxy or video_path.stem.endswith("_ai_proxy"):
+        upload_target = video_path            # already a proxy (--analysis-video)
+    elif proxy_candidate.exists() and proxy_candidate.stat().st_size > 0:
         logger.info("    [AI Proxy] Reusing existing lightweight AI proxy for Vertex AI analysis: %s (%.1f MB)",
                     proxy_candidate.name, proxy_candidate.stat().st_size / (1024 * 1024))
         upload_target = proxy_candidate
-    elif file_size_gb > 1.8:
-        logger.info("    [AI Proxy] Video size (%.1f GB) exceeds the Vertex AI 2.0 GB limit; creating a lightweight AI proxy...",
+    else:
+        logger.info("    [AI Proxy] Creating a lightweight AI proxy (source %.2f GB); the original is never uploaded...",
                     file_size_gb)
         ffmpeg_bin = "/opt/homebrew/bin/ffmpeg" if Path("/opt/homebrew/bin/ffmpeg").exists() else "ffmpeg"
         # macOS: VideoToolbox hardware encode. Windows / Linux (CUDA / CPU hosts) have no VideoToolbox: use libx264.

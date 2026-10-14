@@ -639,7 +639,8 @@ def _run(args):
                         analysis_source.name, video_path.name)
 
         logger.info("==> 3. Staging video to Cloud Storage...")
-        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(analysis_source, resolved_bucket)
+        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(
+            analysis_source, resolved_bucket, already_proxy=bool(getattr(args, "analysis_video", None)))
 
         mode_str = "Agentic Video Understanding" if args.agentic else "Static Multimodal"
         logger.info("==> 4. Running %s [Mode: %s] with Whisper sentences for take arbitration...", args.model, mode_str)

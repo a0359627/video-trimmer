@@ -96,9 +96,11 @@ class TestVertexClient(unittest.TestCase):
     @patch("scripts.gemini_client.upload_file_to_gcs", return_value="gs://my-bucket/raw/xyz_video.mp4")
     def test_stage_video_to_gcs_success(self, mock_upload):
         with tempfile.NamedTemporaryFile(suffix=".mp4") as tmp_vid:
+            # 已經是 AI proxy（--analysis-video）時照原樣上傳；原檔一律先轉 proxy（見 test_no_master_upload.py）
             uri, mime, is_ephemeral = stage_video_to_gcs(
                 video_source=tmp_vid.name,
                 bucket_name="my-bucket",
+                already_proxy=True,
             )
             self.assertEqual(uri, "gs://my-bucket/raw/xyz_video.mp4")
             self.assertEqual(mime, "video/mp4")
