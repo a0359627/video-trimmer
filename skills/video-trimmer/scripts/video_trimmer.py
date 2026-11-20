@@ -14,7 +14,6 @@ An intelligent, end-to-end video rough-cut & trimming engine powered by:
 import argparse
 import json
 import logging
-import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -41,7 +40,7 @@ if __package__ in (None, ""):
     __package__ = "scripts"
 
 from .acoustic import refine_speech_bounds_locked
-from .constants import ALLOWED_INPUT_EXTENSIONS
+from .constants import ALLOWED_INPUT_EXTENSIONS, GEMINI_MAX_VIDEO_BYTES
 from .edl_auditor import (
     audit_edl_quality,
     deduplicate_and_sort_clips,
@@ -61,12 +60,14 @@ from .gemini_client import (
     run_gemini_inference,
     stage_video_to_gcs,
 )
-from .render import probe_video, render_cut_video
+from .render import make_analysis_proxy, probe_video, render_cut_video
 from .transcribe import (
     align_clip_with_whisper,
+    audio_16k_path,
     calculate_active_script_window,
     coalesce_adjacent_sub_units,
     detect_chunk_boundaries,
+    extract_audio_16k_mono,
     resolve_clip_sub_units,
     transcribe_video_whisper,
 )
@@ -88,12 +89,31 @@ def _parse_gemini_json_text(raw_json: str) -> dict:
             cleaned = cleaned[start_idx : end_idx + 1].strip()
     try:
         return json.loads(cleaned)
+    except json.JSONDecodeError as e:
+        # Gemini sometimes appends text or a second object after the JSON ("Extra data").
+        # Keep the first complete object.
+        start_idx = cleaned.find("{")
+        if start_idx != -1:
+            try:
+                obj, _end = json.JSONDecoder().raw_decode(cleaned[start_idx:])
+                if isinstance(obj, dict):
+                    logger.warning("    [JSON 修復] Gemini 回傳含多餘內容，已取第一個完整 JSON 物件 (%s)", e.msg)
+                    return obj
+            except json.JSONDecodeError:
+                pass
+        raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
     except Exception as e:
         raise VideoTrimmerError(f"解析 Gemini JSON 失敗: {e}\n原始回傳內容:\n{cleaned}") from e
 
 
 def _setup_logging(verbose):
     level = logging.DEBUG if verbose else logging.INFO
+    if sys.platform == "win32":
+        # Windows pipes use the ANSI code page (for example cp950). Replace
+        # characters that it cannot encode instead of raising "Logging error".
+        for stream in (sys.stdout, sys.stderr):
+            if hasattr(stream, "reconfigure"):
+                stream.reconfigure(errors="replace")
     logging.basicConfig(level=level, format="%(message)s", stream=sys.stderr)
 
 
@@ -172,6 +192,7 @@ def _run(args):
             video_path,
             whisper_json,
             model_name="small",
+            source_duration=total_dur,
         )
 
     whisper_units = whisper_sentences if whisper_sentences else whisper_segs
@@ -240,7 +261,17 @@ def _run(args):
         ).removeprefix("gs://") or None
 
         logger.info("==> 3. 準備視訊至 Cloud Storage 暫存...")
-        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(video_path, resolved_bucket)
+        gemini_video_path = video_path
+        if video_path.stat().st_size > GEMINI_MAX_VIDEO_BYTES:
+            # Vertex AI rejects very large video files (400 INVALID_ARGUMENT).
+            # Send a proxy with the same timeline; timelines still link to the source.
+            proxy_path = out_dir / f"{base_name}_gemini_proxy.mp4"
+            logger.info(
+                "    [分析代理檔] 原檔 %.1f GB 超過 Gemini 上限 %.1f GB，轉出低解析度代理檔供分析: %s",
+                video_path.stat().st_size / 1024 ** 3, GEMINI_MAX_VIDEO_BYTES / 1024 ** 3, proxy_path.name,
+            )
+            gemini_video_path = make_analysis_proxy(video_path, proxy_path, total_dur)
+        gcs_uri, mime_type, is_ephemeral = stage_video_to_gcs(gemini_video_path, resolved_bucket)
 
         mode_str = "Agentic Video Understanding" if args.agentic else "Static Multimodal"
         logger.info("==> 4. 調用 %s [模式: %s] 結合 Whisper 劇本進行文字剪輯與選鏡決策...", args.model, mode_str)
@@ -356,10 +387,9 @@ def _run(args):
 
     # 第三階段：文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)
     logger.info("==> 5. 執行文字剪輯時間鎖定與聲學收緊 (Text-Based Sub-Clip Locking)...")
-    temp_wav = out_dir / f"temp_{base_name}.wav"
-    subprocess.run(["ffmpeg", "-y", "-i", str(video_path), "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)],
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    audio, sr = sf.read(str(temp_wav))
+    # Reuse the 16 kHz audio from the Whisper stage instead of reading the source again.
+    audio_wav = extract_audio_16k_mono(video_path, audio_16k_path(out_dir, video_path), source_duration=total_dur)
+    audio, sr = sf.read(str(audio_wav))
 
     if whisper_units and isinstance(model_edl, dict) and model_edl.get("final_edl"):
         model_edl["final_edl"] = deduplicate_and_sort_clips(
@@ -429,8 +459,6 @@ def _run(args):
         logger.info("    Clip %2d: In=%6.2fs, Out=%6.2fs (%5.2fs) | 首字: %.2fs, 尾字: %.2fs | %s",
                     seq_id, tight_in, tight_out, dur, t_first, t_last, su["topic"])
 
-    temp_wav.unlink(missing_ok=True)
-
     # 5d. 物理時間軸確定性自癒 (Overlap De-confliction, Plosive Tail Floor, Micro-Clip Coalescing)
     refined_edl, sanitization_stats = sanitize_refined_edl(refined_edl, total_dur)
     total_out_dur = round(sum(c["duration"] for c in refined_edl), 2)
@@ -487,9 +515,12 @@ def _run(args):
     logger.info("==> 9. 輸出 Final Cut Pro X 工程檔: %s", fcpxml_path.name)
 
     out_mp4 = out_dir / f"{base_name}_{tag}_trimmed.mp4"
-    logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
-    render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
-    logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
+    if args.skip_render:
+        logger.info("==> 10. 跳過 FFmpeg 渲染成片 (--skip-render)，僅輸出時間軸與報告。")
+    else:
+        logger.info("==> 10. FFmpeg 渲染成片: %s ...", out_mp4.name)
+        render_cut_video(refined_edl, video_path, out_mp4, crf=args.crf)
+        logger.info("==> [完成] 最終成片已產出！檔案大小: %.1f MB", out_mp4.stat().st_size / (1024 * 1024))
 
     if args.strict and not verdict["pass_quality_gate"]:
         logger.error("==> [嚴格品質閘門未通過] %s", "; ".join(verdict["fatal_violations"]))
@@ -517,6 +548,7 @@ def main():
     parser.add_argument("--cached-json", default=None,
                         help="指定既有之初剪決策 JSON 檔案路徑，跳過 Gemini 上傳與雲端分析")
     parser.add_argument("--skip-whisper", action="store_true", help="跳過本地 Whisper 轉錄，僅使用純能量檢測")
+    parser.add_argument("--skip-render", action="store_true", help="不渲染粗剪 MP4，僅輸出 XML/FCPXML/EDL/CSV 時間軸與審計報告")
     parser.add_argument("--strict", action="store_true", help="啟用嚴格品質閘門 (若 agent_verdict.pass_quality_gate 為 false 則於輸出報告後以 exit code 2 結束)")
     parser.add_argument("--verbose", action="store_true", help="輸出詳細除錯訊息 (DEBUG level)")
     args = parser.parse_args()

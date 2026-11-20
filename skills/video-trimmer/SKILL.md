@@ -47,6 +47,7 @@ video-trimmer/
 ├── LICENSE                           # MIT License
 ├── .env.example                      # Environment variables template for Vertex AI & GCS
 ├── setup.sh                          # 100% Native gcloud GCP provisioning script (Zero Terraform)
+├── setup_windows.ps1                 # Windows local setup (FFmpeg, gcloud, .venv, .env; no cloud changes)
 ├── pyproject.toml                    # Standard Python packaging & CLI console scripts
 ├── requirements.txt                  # Python runtime dependencies
 └── tests/                            # Offline unit tests
@@ -107,6 +108,8 @@ gcloud auth application-default login
 ./setup.sh
 ```
 
+**Windows hosts**: Use `.venv\Scripts\python.exe` (or `python`) in place of `python3`, and set `PYTHONUTF8=1` before you run the CLI so that logs are UTF-8. If an administrator already granted access to an existing project and bucket, do not run `setup.sh`. Run `setup_windows.ps1 -Project <ID> -Bucket <NAME>` to install local tools, then sign in with `gcloud auth application-default login --project=<ID>` and `gcloud auth application-default set-quota-project <ID>`.
+
 ### Step 2: Execute Primary Video Trimmer Pipeline
 
 Default execution uses fast Static Multimodal mode (`MEDIA_RESOLUTION_LOW`), performs automatic surgical micro-window repair (`15s–90s` windows) for any pre-render anomalies, and isolates all generated deliverables inside `<input_dir>/output/` (`./output/` for Google Drive links). Pass `--agentic` only when the user explicitly requests full-video Agentic Video Understanding.
@@ -155,6 +158,7 @@ python3 skills/video-trimmer/scripts/video_trimmer.py -i "/path/to/raw_footage.m
 | `--suffix` | | `None` | Custom tag suffix for generated filenames. |
 | `--crf` | | `18` | FFmpeg H.264 rendering CRF parameter (18 = visually lossless). |
 | `--skip-whisper`| | `False` | Skip local Whisper transcription (use pure energy fallback). |
+| `--skip-render`| | `False` | Do not render the trimmed MP4. Write only the timelines (`.xml`, `.fcpxml`, `.edl`, `.csv`) and audit reports. |
 | `--strict` | | `False` | Exit with code `2` after writing audit reports if `agent_verdict.pass_quality_gate` is `False`. |
 | `--verbose` | | `False` | Verbose DEBUG-level logging (default is INFO). |
 

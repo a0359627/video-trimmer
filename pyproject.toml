@@ -44,10 +44,12 @@ mlx = [
     "mlx-whisper>=0.4.0; sys_platform == 'darwin'"
 ]
 whisper = [
-    "faster-whisper>=1.0.0"
+    "faster-whisper>=1.0.0",
+    "av>=11,<19",
 ]
 all = [
     "faster-whisper>=1.0.0",
+    "av>=11,<19",
     "mlx-whisper>=0.4.0; sys_platform == 'darwin'",
 ]
 dev = [

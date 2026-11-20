@@ -11,6 +11,7 @@ import hashlib
 import logging
 import os
 import re
+import sys
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -85,6 +86,22 @@ def compute_file_md5(filepath: Path | str) -> str:
     return h.hexdigest()
 
 
+def compute_file_sha256_and_md5(filepath: Path | str) -> tuple[str, str]:
+    """
+    Compute SHA-256 and MD5 hex digests in one read pass.
+
+    One pass halves the read time for large files on slow storage
+    (for example, Google Drive streaming drives).
+    """
+    sha = hashlib.sha256()
+    md5 = hashlib.md5()
+    with open(filepath, "rb") as f:
+        for chunk in iter(lambda: f.read(8 * 1024 * 1024), b""):
+            sha.update(chunk)
+            md5.update(chunk)
+    return sha.hexdigest(), md5.hexdigest()
+
+
 def is_gdrive_source(val: str | Path | None) -> bool:
     """Return True if val is a Google Drive URL or gdrive:// URI."""
     if not val:
@@ -128,6 +145,16 @@ def parse_gdrive_url(url_or_id: str) -> dict:
     raise ValueError(f"無法解析 Google Drive 連結或 ID: {url_or_id}")
 
 
+def _gcloud_config_dir() -> str:
+    """Return the gcloud config directory (CLOUDSDK_CONFIG, %APPDATA%/gcloud on Windows, or ~/.config/gcloud)."""
+    env_dir = os.environ.get("CLOUDSDK_CONFIG")
+    if env_dir:
+        return env_dir
+    if sys.platform == "win32" and os.environ.get("APPDATA"):
+        return os.path.join(os.environ["APPDATA"], "gcloud")
+    return os.path.expanduser("~/.config/gcloud")
+
+
 def _load_gcloud_user_drive_credentials():
     """
     Attempt to load personal user Google Drive credentials (user@gmail.com) from
@@ -139,7 +166,7 @@ def _load_gcloud_user_drive_credentials():
     import google.auth
     from google.auth.transport.requests import Request as GoogleAuthRequest
 
-    gcloud_dir = os.path.expanduser("~/.config/gcloud")
+    gcloud_dir = _gcloud_config_dir()
     legacy_dir = os.path.join(gcloud_dir, "legacy_credentials")
     if not os.path.isdir(legacy_dir):
         return None
@@ -407,8 +434,7 @@ def upload_file_to_gcs(
     blob = bucket.blob(destination_blob_name)
 
     try:
-        file_sha256 = compute_file_sha256(local_p)
-        file_md5 = compute_file_md5(local_p)
+        file_sha256, file_md5 = compute_file_sha256_and_md5(local_p)
         file_size = local_p.stat().st_size
     except OSError:
         file_sha256 = None

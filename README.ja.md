@@ -116,6 +116,32 @@ chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
 
+### Windows でのセットアップと注意点
+
+本ツールは macOS 上で開発されました。Windows 11（Python 3.14、FFmpeg 8.1）で動作を確認済みです。
+
+```powershell
+# FFmpeg と Google Cloud SDK のインストール、.venv 作成、依存パッケージのインストール（ローカルのみ、クラウド変更なし）
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Project YOUR_GCP_PROJECT_ID -Bucket YOUR_BUCKET
+
+# 権限付与済みアカウントで ADC にログイン
+gcloud auth application-default login --project=YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project YOUR_GCP_PROJECT_ID
+
+# 実行（ログを cp932 ではなく UTF-8 で出力するため PYTHONUTF8=1 を推奨）
+$env:PYTHONUTF8 = "1"
+.\.venv\Scripts\python.exe skills\video-trimmer\scripts\video_trimmer.py -i "C:\path\to\raw_footage.mp4"
+```
+
+| 項目 | macOS | Windows |
+| :--- | :--- | :--- |
+| Whisper 文字起こし | `mlx-whisper`（Metal GPU） | `faster-whisper`（CPU int8、全コア使用） |
+| ハードウェアエンコード | VideoToolbox | Intel QSV、NVIDIA NVENC、AMD AMF の順に試行し、最後に `libx264` |
+| Python コマンド | `python3` | `python`（または `.venv\Scripts\python.exe`） |
+
+- クリップ数が多い場合（約 150 以上）、FFmpeg コマンドが Windows の上限 32,767 文字を超えます。この場合、フィルタグラフを `-/filter_complex` でファイルから読み込みます（FFmpeg 7.0 以上が必要）。
+- `setup.sh` は bucket の作成と IAM の変更を行います。管理者が既に権限を付与している場合は実行せず、ADC へのログインと `.env` の作成のみ行ってください。
+
 ---
 
 ## Antigravity での操作方法と利用シナリオ (Usage & Scenarios)

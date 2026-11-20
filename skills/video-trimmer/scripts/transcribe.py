@@ -4,9 +4,12 @@ import difflib
 import json
 import logging
 import math
+import os
 import re
 import subprocess
 from pathlib import Path
+
+from .exceptions import FFmpegError
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +26,57 @@ except ImportError:
     HAS_FASTER_WHISPER = False
 
 HAS_WHISPER = HAS_MLX_WHISPER or HAS_FASTER_WHISPER
+
+# Maximum allowed duration difference between the source and its extracted audio.
+AUDIO_MAX_DURATION_DIFF_SEC = 1.0
+
+
+def audio_16k_path(out_dir, video_path):
+    """Return the shared 16 kHz mono WAV path for a source video."""
+    return Path(out_dir) / f"{Path(video_path).stem}_audio_16k.wav"
+
+
+def _wav_duration(wav_path):
+    import soundfile as sf
+    info = sf.info(str(wav_path))
+    return info.frames / float(info.samplerate)
+
+
+def extract_audio_16k_mono(video_path, wav_path, source_duration=None):
+    """
+    Extract 16 kHz mono PCM audio once and reuse it.
+
+    Whisper and acoustic snapping both need this audio. Reading a large source
+    (for example, 22 GB on a cloud streaming drive) takes a long time, so the
+    WAV stays in the output directory. When source_duration is given, the WAV
+    length must match it, to detect a read that stopped early.
+    """
+    wav_path = Path(wav_path)
+
+    def _matches():
+        if source_duration is None:
+            return True
+        try:
+            return abs(_wav_duration(wav_path) - source_duration) <= AUDIO_MAX_DURATION_DIFF_SEC
+        except RuntimeError:  # soundfile cannot read a broken WAV
+            return False
+
+    if wav_path.exists() and wav_path.stat().st_size > 0 and _matches():
+        logger.info("    沿用既有 16kHz 音軌: %s", wav_path.name)
+        return wav_path
+
+    subprocess.run([
+        "ffmpeg", "-y", "-i", str(video_path),
+        "-vn", "-ac", "1", "-ar", "16000", str(wav_path)
+    ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    if not wav_path.exists() or not _matches():
+        got = _wav_duration(wav_path) if wav_path.exists() else 0.0
+        raise FFmpegError(
+            f"Audio extraction is incomplete: {got:.1f}s of {source_duration:.1f}s. "
+            "The source read may have stopped early (for example, on a cloud streaming drive)."
+        )
+    return wav_path
 
 
 def normalize_text(text):
@@ -347,7 +401,8 @@ def merge_whisper_segments_to_sentences(segments, max_gap=0.20, max_sentence_dur
 def transcribe_video_whisper(
     video_path,
     out_json_path,
-    model_name="small"
+    model_name="small",
+    source_duration=None,
 ):
     """
     第一階段：微觀聲學時間戳對齊 (Word-level Ground Truth)
@@ -363,11 +418,9 @@ def transcribe_video_whisper(
         with open(out_json, "r", encoding="utf-8") as f:
             raw_results = json.load(f)
     elif HAS_WHISPER:
-        temp_wav = out_json.parent / f"temp_{video_path.stem}_whisper.wav"
-        subprocess.run([
-            "ffmpeg", "-y", "-i", str(video_path),
-            "-vn", "-ac", "1", "-ar", "16000", str(temp_wav)
-        ], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        temp_wav = extract_audio_16k_mono(
+            video_path, audio_16k_path(out_json.parent, video_path), source_duration=source_duration
+        )
 
         if HAS_MLX_WHISPER:
             logger.info("本地調用 mlx-whisper (%s) [Apple Silicon Metal GPU 原生加速] 進行微觀字級時間戳轉錄...", model_name)
@@ -390,7 +443,8 @@ def transcribe_video_whisper(
                 })
         else:
             logger.info("本地調用 faster-whisper (%s) 進行微觀字級時間戳轉錄...", model_name)
-            model = WhisperModel(model_name, device="cpu", compute_type="int8")
+            # Use all CPU cores. The CTranslate2 default is 4 threads.
+            model = WhisperModel(model_name, device="cpu", compute_type="int8", cpu_threads=os.cpu_count() or 4)
             segments, _ = model.transcribe(str(temp_wav), word_timestamps=True, language="zh")
 
             for i, s in enumerate(segments):
@@ -409,8 +463,6 @@ def transcribe_video_whisper(
                     "text": s.text.strip(),
                     "words": words_data
                 })
-
-        temp_wav.unlink(missing_ok=True)
 
         with open(out_json, "w", encoding="utf-8") as f:
             json.dump(raw_results, f, ensure_ascii=False, indent=2)

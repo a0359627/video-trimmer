@@ -124,6 +124,7 @@ video-trimmer/
 │           └── video_cut_prompt.md          # 雙模式語意仲裁與五律減法剪輯規範
 ├── AGENTS.md                                # 工作區與開發工程規範（Part I 執行守則 & Part II 開發規範）
 ├── setup.sh                                 # 原生 gcloud 雲端環境一鍵配置腳本
+├── setup_windows.ps1                        # Windows 本機環境安裝（FFmpeg、gcloud、.venv、.env；不變更雲端）
 └── tests/                                   # 離線單元測試套件（101 項測試）
 ```
 
@@ -163,6 +164,32 @@ cd ~/.gemini/config/plugins/video-trimmer
 chmod +x setup.sh
 ./setup.sh --project YOUR_GCP_PROJECT_ID --region us-central1
 ```
+
+### 4. Windows 安裝與注意事項
+
+本工具原在 macOS 上開發，已在 Windows 11（Python 3.14、FFmpeg 8.1）驗證可執行。
+
+```powershell
+# 安裝 FFmpeg 與 Google Cloud SDK、建立 .venv 並安裝套件（只裝本機工具，不變更任何雲端資源）
+powershell -ExecutionPolicy Bypass -File .\setup_windows.ps1 -Project YOUR_GCP_PROJECT_ID -Bucket YOUR_BUCKET
+
+# 以獲授權帳號登入 ADC
+gcloud auth application-default login --project=YOUR_GCP_PROJECT_ID
+gcloud auth application-default set-quota-project YOUR_GCP_PROJECT_ID
+
+# 執行（建議設定 PYTHONUTF8=1，讓 log 以 UTF-8 輸出而非 cp950）
+$env:PYTHONUTF8 = "1"
+.\.venv\Scripts\python.exe skills\video-trimmer\scripts\video_trimmer.py -i "C:\path\to\raw_footage.mp4"
+```
+
+| 項目 | macOS | Windows |
+| :--- | :--- | :--- |
+| Whisper 轉錄 | `mlx-whisper`（Metal GPU） | `faster-whisper`（CPU int8，使用全部核心） |
+| 硬體編碼 | VideoToolbox | 依序嘗試 Intel QSV、NVIDIA NVENC、AMD AMF，最後 `libx264` |
+| Python 指令 | `python3` | `python`（或 `.venv\Scripts\python.exe`） |
+
+- 片段很多時（約 150 段以上），FFmpeg 指令會超過 Windows 32,767 字元上限，此時會自動改用 `-/filter_complex` 從檔案讀取濾鏡圖（需 FFmpeg 7.0 以上）。
+- `setup.sh` 會建立 bucket 並變更 IAM。若管理者已開通權限，請勿執行，只需登入 ADC 並寫好 `.env`。
 
 ---
 

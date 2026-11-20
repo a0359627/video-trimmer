@@ -30,3 +30,12 @@ GEMINI_RETRY_WAIT_MAX_SEC = 4
 GEMINI_MAX_OUTPUT_TOKENS = 65536
 
 
+
+# --- Gemini video input size limit ---
+# Vertex AI rejects very large Cloud Storage video files with 400 INVALID_ARGUMENT.
+# A 22 GB 4K camera original failed; a 258 MB stream-copy clip of the same file passed.
+# Above this size, upload a small analysis proxy with the same timeline instead.
+GEMINI_MAX_VIDEO_BYTES = 2 * 1024 ** 3
+ANALYSIS_PROXY_HEIGHT = 720
+# Maximum allowed duration difference between source and proxy (truncated read guard).
+ANALYSIS_PROXY_MAX_DURATION_DIFF_SEC = 1.0

@@ -149,11 +149,54 @@ class TestRenderCutVideo(unittest.TestCase):
 
         fail_proc = MagicMock(returncode=1, stderr="vt failed")
         ok_proc = MagicMock(returncode=0, stderr="")
-        with patch("scripts.render.subprocess.run", side_effect=[fail_proc, fail_proc, ok_proc]) as mock_run:
+        with patch("scripts.render.sys.platform", "darwin"), \
+                patch("scripts.render.subprocess.run", side_effect=[fail_proc, fail_proc, ok_proc]) as mock_run:
             render_cut_video(_sample_edl(), "raw_footage.mp4", "out_trimmed.mp4", crf=20)
             self.assertEqual(mock_run.call_count, 3)
             final_cmd = " ".join(mock_run.call_args_list[2][0][0])
             self.assertIn("-c:v libx264 -preset fast -crf 20 -g 30", final_cmd)
+
+    def test_render_cut_video_windows_tries_qsv_nvenc_amf_then_libx264(self):
+        from unittest.mock import MagicMock, patch
+        from scripts.render import render_cut_video
+
+        fail_proc = MagicMock(returncode=1, stderr="encoder unavailable")
+        ok_proc = MagicMock(returncode=0, stderr="")
+        with patch("scripts.render.sys.platform", "win32"), \
+                patch("scripts.render.subprocess.run",
+                      side_effect=[fail_proc, fail_proc, fail_proc, ok_proc]) as mock_run:
+            render_cut_video(_sample_edl(), "raw_footage.mp4", "out_trimmed.mp4", crf=20)
+            cmds = [" ".join(call[0][0]) for call in mock_run.call_args_list]
+            self.assertIn("-c:v h264_qsv -b:v 12M -g 30", cmds[0])
+            self.assertIn("-c:v h264_nvenc", cmds[1])
+            self.assertIn("-c:v h264_amf", cmds[2])
+            self.assertIn("-c:v libx264 -preset fast -crf 20 -g 30", cmds[3])
+            self.assertNotIn("videotoolbox", " ".join(cmds))
+
+    def test_windows_long_command_moves_filtergraph_to_file(self):
+        from unittest.mock import MagicMock, patch
+        from scripts.render import WINDOWS_CMDLINE_LIMIT, render_cut_video
+
+        edl = [
+            {"clip_id": i, "topic": "A", "source_in": i * 2.0, "source_out": i * 2.0 + 1.0, "duration": 1.0}
+            for i in range(400)
+        ]
+        seen = {}
+
+        def fake_run(cmd, **kwargs):
+            seen["cmd"] = cmd
+            graph_path = cmd[cmd.index("-/filter_complex") + 1]
+            seen["graph"] = Path(graph_path).read_text(encoding="utf-8")
+            return MagicMock(returncode=0, stderr="")
+
+        with patch("scripts.render.sys.platform", "win32"), \
+                patch("scripts.render.subprocess.run", side_effect=fake_run):
+            render_cut_video(edl, "raw_footage.mp4", "out_trimmed.mp4", crf=20)
+
+        self.assertNotIn("-filter_complex", seen["cmd"])
+        self.assertIn("concat=n=400", seen["graph"])
+        import subprocess as _sp
+        self.assertLessEqual(len(_sp.list2cmdline(seen["cmd"])), WINDOWS_CMDLINE_LIMIT)
 
     def test_real_ffmpeg_filtergraph_execution(self):
         import shutil
@@ -209,3 +252,147 @@ class TestResolveOutputDir(unittest.TestCase):
             self.assertTrue(out_dir.is_dir())
 
 
+
+
+class TestAnalysisProxy(unittest.TestCase):
+    def _make_source(self, path, seconds=3):
+        import subprocess
+        subprocess.run(
+            [
+                "ffmpeg", "-y",
+                "-f", "lavfi", "-i", f"color=c=black:s=1920x1080:r=30:d={seconds}",
+                "-f", "lavfi", "-i", f"sine=frequency=440:sample_rate=48000:duration={seconds}",
+                "-c:v", "libx264", "-preset", "ultrafast", "-c:a", "aac", str(path),
+            ],
+            check=True, capture_output=True,
+        )
+
+    def test_proxy_keeps_timeline_and_is_reused(self):
+        import shutil
+        from unittest.mock import patch
+        from scripts.render import make_analysis_proxy, probe_video
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "raw_footage.mp4"
+            proxy = Path(tmp) / "raw_footage_gemini_proxy.mp4"
+            self._make_source(src)
+            src_dur = probe_video(src)[0]
+
+            make_analysis_proxy(src, proxy, src_dur)
+            dur, _w, h, _fps = probe_video(proxy)
+            self.assertAlmostEqual(dur, src_dur, delta=0.1)
+            self.assertEqual(h, 720)
+
+            with patch("scripts.render._build_proxy_cmd") as mock_build:
+                make_analysis_proxy(src, proxy, src_dur)
+                mock_build.assert_not_called()
+
+    def test_proxy_shorter_than_source_raises(self):
+        import shutil
+        from scripts.exceptions import FFmpegError
+        from scripts.render import make_analysis_proxy, probe_video
+
+        if not shutil.which("ffmpeg"):
+            self.skipTest("ffmpeg is not installed")
+        with tempfile.TemporaryDirectory() as tmp:
+            src = Path(tmp) / "raw_footage.mp4"
+            proxy = Path(tmp) / "raw_footage_gemini_proxy.mp4"
+            self._make_source(src)
+            src_dur = probe_video(src)[0]
+            with self.assertRaises(FFmpegError):
+                make_analysis_proxy(src, proxy, src_dur + 5.0)
+
+
+class TestMediaFileUrl(unittest.TestCase):
+    def test_url_is_percent_encoded_with_forward_slashes(self):
+        from urllib.parse import unquote, urlparse
+        from scripts.exporters import media_file_url
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "拍帶 資料夾" / "raw footage？.mp4"
+            video.parent.mkdir()
+            video.write_bytes(b"")
+            url = media_file_url(video)
+            self.assertTrue(url.startswith("file://localhost/"))
+            self.assertNotIn("\\", url)
+            self.assertNotIn(" ", url)
+            parsed = urlparse(url)
+            self.assertEqual(parsed.netloc, "localhost")
+            decoded = unquote(parsed.path)
+            if decoded[2:3] == ":":  # /C:/... on Windows
+                decoded = decoded[1:]
+            self.assertEqual(Path(decoded), video.resolve())
+
+    def test_fcp7_xml_and_fcpxml_use_media_file_url(self):
+        from scripts.exporters import media_file_url
+
+        with tempfile.TemporaryDirectory() as tmp:
+            video = Path(tmp) / "raw footage.mp4"
+            video.write_bytes(b"")
+            xml_path = Path(tmp) / "out.xml"
+            fcpxml_path = Path(tmp) / "out.fcpxml"
+            edl = _sample_edl()
+            generate_fcp7_xml(edl, video, 30.0, xml_path, 1920, 1080, 24.0)
+            generate_fcpxml(edl, video, 30.0, sum(c["duration"] for c in edl), fcpxml_path, 24.0)
+            url = media_file_url(video)
+            self.assertEqual(ET.parse(xml_path).getroot().find(".//pathurl").text, url)
+            self.assertEqual(ET.parse(fcpxml_path).getroot().find(".//asset").get("src"), url)
+
+
+class TestParseGeminiJson(unittest.TestCase):
+    def test_extra_data_after_object_keeps_first_object(self):
+        from scripts.video_trimmer import _parse_gemini_json_text
+
+        raw = '{"final_edl": [{"clip_id": 1}]}\n{"final_edl": []}'
+        self.assertEqual(_parse_gemini_json_text(raw), {"final_edl": [{"clip_id": 1}]})
+
+    def test_invalid_json_still_raises(self):
+        from scripts.exceptions import VideoTrimmerError
+        from scripts.video_trimmer import _parse_gemini_json_text
+
+        with self.assertRaises(VideoTrimmerError):
+            _parse_gemini_json_text('{"final_edl": [')
+
+
+class TestFcp7XmlPremiereStructure(unittest.TestCase):
+    def _build(self, fps=29.97, topic="A & B <test>"):
+        tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(tmp.cleanup)
+        video = Path(tmp.name) / "raw_footage.mp4"
+        video.write_bytes(b"")
+        xml_path = Path(tmp.name) / "out.xml"
+        edl = _sample_edl()
+        edl[0] = dict(edl[0], topic=topic)
+        generate_fcp7_xml(edl, video, 30.0, xml_path, 3840, 2160, fps)
+        return ET.parse(xml_path).getroot(), edl
+
+    def test_file_defined_once_with_media_characteristics(self):
+        root, edl = self._build()
+        files = root.findall(".//file")
+        full = [f for f in files if f.find("pathurl") is not None]
+        self.assertEqual(len(full), 1)
+        self.assertEqual(len(files), len(edl) * 2)
+        self.assertEqual(full[0].find("media/video/samplecharacteristics/width").text, "3840")
+        self.assertEqual(full[0].find("media/audio/channelcount").text, "2")
+
+    def test_audio_clips_have_source_track_and_links(self):
+        root, edl = self._build()
+        audio_clips = root.findall("./sequence/media/audio/track/clipitem")
+        self.assertEqual(len(audio_clips), len(edl))
+        for clip in audio_clips:
+            self.assertEqual(clip.find("sourcetrack/mediatype").text, "audio")
+            self.assertEqual(len(clip.findall("link")), 2)
+        self.assertEqual(root.find("./sequence/duration").text,
+                         str(sum(int(c.find("end").text) - int(c.find("start").text) for c in audio_clips)))
+
+    def test_names_are_escaped(self):
+        root, _ = self._build(topic="A & B <test>")
+        self.assertIn("A & B <test>", root.find(".//clipitem/name").text)
+
+    def test_ntsc_flag_follows_frame_rate(self):
+        root, _ = self._build(fps=29.97)
+        self.assertEqual(root.find("./sequence/rate/ntsc").text, "TRUE")
+        root, _ = self._build(fps=25.0)
+        self.assertEqual(root.find("./sequence/rate/ntsc").text, "FALSE")
